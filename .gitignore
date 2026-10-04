@@ -1,0 +1,77 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments (Crucial to exclude from repo)
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing and Coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Logging
+*.log
+pip-log.txt
+
+# Common IDEs and Editors (Optional but highly recommended)
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# --- Trading Agent project-specific ---
+# Local virtual environments (the accidental "trading_bot" venv is ignored too).
+trading_bot/
+.venv/
+
+# Runtime artifacts: local database, logs, cached/historical data.
+data/
+logs/
+*.sqlite3
+*.db
+
+# Tooling / scratch
+.freebuff/
+

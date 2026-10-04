@@ -1,0 +1,33 @@
+# Core runtime dependencies for the Trading Agent (paper-trading only).
+#
+# The primary, human-editable operational configuration lives in
+# configs/config.yaml. Secrets live in .env (never committed).
+
+# --- Web / API layer ---
+fastapi>=0.110
+uvicorn[standard]>=0.29
+
+# --- Configuration & validation ---
+pydantic>=2.6
+pydantic-settings>=2.2
+PyYAML>=6.0
+python-dotenv>=1.0
+
+# --- HTTP / async ---
+httpx>=0.27
+websockets>=12.0
+
+# --- Persistence (PostgreSQL-ready, SQLite for dev/tests) ---
+SQLAlchemy>=2.0
+aiosqlite>=0.20
+greenlet>=3.0
+
+# --- Broker / data provider ---
+alpaca-py>=0.28
+
+# --- Numerics / data ---
+numpy>=1.26
+
+# --- Testing ---
+pytest>=8.0
+pytest-asyncio>=0.23

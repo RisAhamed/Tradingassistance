@@ -1,0 +1,248 @@
+# =============================================================================
+# Trading Agent — CENTRAL CONFIGURATION (single source of truth).
+#
+# This file controls ALL non-secret behaviour. Code implements behaviour;
+# this file controls it. Secrets live in .env only — NEVER put secrets here.
+#
+# Precedence (highest first):
+#   1. Explicit runtime override (intentionally supported only where noted)
+#   2. Environment variable (secrets + a few operational switches)
+#   3. This file (configs/config.yaml)
+#   4. Safe application default (never for critical trading parameters)
+# =============================================================================
+
+application:
+  name: trading-agent
+  environment: development   # development | paper | test
+  log_level: INFO
+  timezone: UTC
+
+trading:
+  mode: paper                # ONLY "paper" is accepted. Live is refused.
+  enabled: true
+  symbol: BTC/USD            # architecture is symbol-agnostic; not hardcoded in code
+  market: crypto
+  broker: alpaca             # alpaca | mock
+  # When true the engine auto-starts the paper trading loop on app startup.
+  autostart: true
+
+session:
+  enabled: true
+  timezone: UTC
+  start: "00:00"
+  end: "23:59"
+  entry_cutoff: "23:30"      # no NEW entries after this time
+  flatten_deadline: "23:55"  # positions must be flat by this time
+  max_holding_minutes: 240
+
+market_data:
+  provider: alpaca           # alpaca | mock
+  feed: crypto
+  websocket_enabled: true
+  reconnect:
+    enabled: true
+    max_attempts: 10
+    initial_delay_seconds: 1
+    max_delay_seconds: 60
+  # A snapshot older than this is considered stale and blocks new entries.
+  max_age_seconds: 5
+
+timeframes:
+  context: 15m               # market context
+  signal: 5m                 # strategy evaluation
+  execution: 1m              # execution timing
+
+features:
+  ema:
+    enabled: true
+    periods: [20, 50]
+  rsi:
+    enabled: true
+    period: 14
+  atr:
+    enabled: true
+    period: 14
+  vwap:
+    enabled: true
+  volatility:
+    enabled: true
+  volume:
+    enabled: true
+  range:
+    lookback_periods: 20
+
+regime:
+  enabled: true
+  trending:
+    # |fast EMA - slow EMA| / ATR above this => trending
+    ema_distance_atr_min: 0.25
+  volatility:
+    # ATR / price percentile thresholds
+    high_volatility_percent: 0.02
+    low_volatility_percent: 0.005
+  # Minimum candles required before a regime may be classified.
+  min_candles: 20
+
+strategy:
+  enabled: true
+  name: breakout_momentum
+  version: "1.0"
+  breakout:
+    lookback_periods: 20
+    buffer_percent: 0.05      # price must exceed range by this %
+  momentum:
+    enabled: true
+    rsi_min_long: 55
+    rsi_max_long: 75
+    rsi_min_short: 25
+    rsi_max_short: 45
+  trend:
+    enabled: true
+    fast_ema: 20
+    slow_ema: 50
+  volatility:
+    minimum_atr: 0
+    maximum_atr: 0
+  spread:
+    maximum_percent: 0.10
+  cooldown:
+    enabled: true
+    minutes: 5
+
+risk:
+  enabled: true
+  risk_per_trade_percent: 0.5
+  maximum_daily_loss_percent: 2.0
+  maximum_open_positions: 1
+  maximum_position_value_percent: 20
+  maximum_orders_per_session: 20
+  stop_loss:
+    enabled: true
+    atr_multiplier: 1.5
+  take_profit:
+    enabled: true
+    risk_reward_ratio: 2.0
+  maximum_holding_minutes: 240
+  stale_market_data:
+    maximum_age_seconds: 5
+  maximum_spread_percent: 0.10
+
+position_sizing:
+  method: risk_based
+  risk_per_trade_percent: 0.5
+  minimum_quantity: 0.000001
+  maximum_quantity: 100.0
+  quantity_precision: 6
+
+execution:
+  order_type: market         # market | limit
+  allow_short: true
+  slippage:
+    protection_enabled: true
+    maximum_percent: 0.20
+  retry:
+    enabled: true
+    maximum_attempts: 3
+  duplicate_order_protection: true
+
+session_closeout:
+  enabled: true
+  flatten_all_positions: true
+  stop_new_entries_before_end_minutes: 30
+  retry_flatten: true
+  maximum_flatten_attempts: 3
+  require_position_zero: true
+
+backtesting:
+  enabled: true
+  initial_capital: 100000
+  commission: 0
+  slippage_percent: 0.05
+
+ai:
+  enabled: true
+  provider: ollama
+  model:
+    name: ""                 # empty => use OLLAMA_MODEL env or a safe default
+    temperature: 0.1
+    max_tokens: 2000
+  endpoint:
+    base_url: http://localhost:11434
+  behavior:
+    run_on_every_tick: false
+    run_on_events_only: true
+    investigate_order_rejection: true
+    investigate_risk_failure: true
+    investigate_reconciliation_failure: true
+    investigate_system_error: true
+    investigate_unexpected_position: true
+  permissions:
+    read_only: true
+    allow_pause: true
+    allow_resume: true
+    allow_reconciliation: true
+    allow_flatten: false
+  limits:
+    maximum_tool_calls_per_event: 5
+    timeout_seconds: 30
+
+logging:
+  level: INFO
+  console:
+    enabled: true
+    format: structured
+  file:
+    enabled: true
+    path: logs/trading-agent.log
+  rotation:
+    enabled: true
+    maximum_size_mb: 50
+    backup_count: 5
+  events:
+    market_data: true
+    strategy: true
+    signals: true
+    risk: true
+    orders: true
+    execution: true
+    positions: true
+    pnl: true
+    session: true
+    ai: true
+
+dashboard:
+  enabled: true
+  host: 127.0.0.1
+  port: 8000
+  refresh:
+    mode: sse                # sse | websocket | polling
+    fallback: polling
+    polling_interval_seconds: 2
+
+monitoring:
+  enabled: true
+  health_checks:
+    market_data: true
+    broker: true
+    database: true
+    ai: true
+
+alerts:
+  enabled: true
+  # NOTE: "on" is quoted because bare `on` is parsed as a boolean by YAML 1.1.
+  "on":
+    broker_disconnect: true
+    market_data_disconnect: true
+    stale_market_data: true
+    risk_limit_breach: true
+    order_rejection: true
+    reconciliation_failure: true
+    flatten_failure: true
+    system_error: true
+
+storage:
+  enabled: true
+  # Leave url empty to use a local SQLite file under ./data/. PostgreSQL-ready.
+  url: ""
+  sqlite_path: data/trading_agent.sqlite3
+  echo: false

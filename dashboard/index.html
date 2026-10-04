@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trading Agent — Paper Trading Dashboard</title>
+  <style>
+    :root { color-scheme: dark; --bg: #0b0e14; --card: #141a26; --line: #243046; --txt: #e6edf7; --dim: #93a1b8; --ok: #3ddc84; --warn: #ffb020; --err: #ff5c5c; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--txt); font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header { padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+    header h1 { margin: 0; font-size: 18px; }
+    .banner { display: inline-block; background: #1c2942; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; font-size: 12px; color: var(--dim); }
+    main { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; padding: 16px 20px 40px; }
+    section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; min-height: 120px; }
+    section h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    button { background: #22314e; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+    button:hover { background: #2b3d61; }
+    #stream { font-size: 12px; color: var(--dim); }
+    .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Trading Agent</h1>
+    <span class="banner">PAPER_TRADING_ONLY</span>
+    <span class="banner" id="health">health: …</span>
+    <span class="banner" id="session">session: …</span>
+  </header>
+  <div style="padding:12px 20px 0" class="row">
+    <button data-action="pause">Pause</button>
+    <button data-action="resume">Resume</button>
+    <button data-action="flatten">Flatten</button>
+    <button data-action="reconcile">Reconcile</button>
+    <span id="ctl-msg" class="banner">controls call the same command layer as AI actions</span>
+  </div>
+  <main>
+    <section><h2>System</h2><pre id="system">loading…</pre></section>
+    <section><h2>Market</h2><pre id="market">loading…</pre></section>
+    <section><h2>Features</h2><pre id="features">loading…</pre></section>
+    <section><h2>Regime</h2><pre id="regime">loading…</pre></section>
+    <section><h2>Strategy</h2><pre id="strategy">loading…</pre></section>
+    <section><h2>Risk</h2><pre id="risk">loading…</pre></section>
+    <section><h2>Position</h2><pre id="position">loading…</pre></section>
+    <section><h2>P&amp;L</h2><pre id="pnl">loading…</pre></section>
+    <section><h2>Orders</h2><pre id="orders">loading…</pre></section>
+    <section><h2>Session</h2><pre id="sess">loading…</pre></section>
+    <section><h2>AI Supervisor</h2><pre id="ai">loading…</pre></section>
+    <section><h2>Live events (SSE)</h2><div id="stream">connecting…</div></section>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const show = (id, v) => { $(id).textContent = typeof v === "string" ? v : JSON.stringify(v, null, 2); };
+    async function get(path) {
+      const res = await fetch(path);
+      if (!res.ok) throw new Error(path + " -> " + res.status);
+      return res.json();
+    }
+    async function refresh() {
+      try {
+        const [health, system, market, features, regime, strategy, risk, positions, pnl, orders, session, ai] =
+          await Promise.all([
+            get("/health"), get("/api/system/status"), get("/api/market/latest"), get("/api/features"),
+            get("/api/regime"), get("/api/strategy/status"), get("/api/risk/status"), get("/api/positions"),
+            get("/api/pnl"), get("/api/orders"), get("/api/session"), get("/api/ai/status"),
+          ]);
+        $("health").textContent = "health: " + health.status + (health.ready ? " (ready)" : " (not ready)");
+        $("health").className = "banner " + (health.status === "healthy" ? "ok" : health.status === "warning" ? "warn" : "err");
+        show("system", system); show("market", market); show("features", features); show("regime", regime);
+        show("strategy", strategy); show("risk", risk); show("position", positions);
+        show("pnl", pnl); show("orders", orders); show("sess", session); show("ai", ai);
+        $("session").textContent = "session: " + (((session || {}).session || {}).state || "…");
+      } catch (err) { $("health").textContent = "health: api unavailable (" + err.message + ")"; }
+    }
+    document.querySelectorAll("button[data-action]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const action = btn.getAttribute("data-action");
+        $("ctl-msg").textContent = action + "…";
+        try {
+          const res = await fetch("/api/control/" + action, { method: "POST" });
+          $("ctl-msg").textContent = action + ": " + res.status + " " + (await res.text()).slice(0, 200);
+          await refresh();
+        } catch (err) { $("ctl-msg").textContent = action + " failed: " + err.message; }
+      });
+    });
+    function stream() {
+      const es = new EventSource("/api/stream");
+      es.onmessage = (ev) => {
+        const el = document.createElement("div");
+        el.textContent = ev.data.slice(0, 300);
+        const box = $("stream");
+        box.prepend(el);
+        while (box.children.length > 25) box.lastChild.remove();
+      };
+      es.onerror = () => { $("stream").textContent = "stream disconnected — polling every 2s"; es.close(); setTimeout(stream, 5000); };
+    }
+    refresh(); setInterval(refresh, 2000); stream();
+  </script>
+</body>
+</html>
