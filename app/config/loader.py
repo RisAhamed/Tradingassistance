@@ -67,6 +67,15 @@ def _apply_env_overrides(data: dict[str, Any], env: EnvSettings) -> None:
     if env.alpaca_data_feed:
         data.setdefault("market_data", {})["feed"] = env.alpaca_data_feed
 
+    # Phase C1 mode switch: the *real-data* environment opts into the Alpaca
+    # historical warm-up and bar stream explicitly, while tests/offline runs stay
+    # on the shipped defaults (provider "none") without touching Python.
+    market_data = data.setdefault("market_data", {})
+    if env.market_data_provider:
+        market_data["provider"] = env.market_data_provider
+    if env.market_data_history_provider:
+        market_data.setdefault("history", {})["provider"] = env.market_data_history_provider
+
     if env.database_url:
         data.setdefault("storage", {})["url"] = env.database_url
 

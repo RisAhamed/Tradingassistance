@@ -62,6 +62,14 @@ class MarketStore:
             return
         series.append(candle)
 
+    def replace_candles(self, symbol: str, timeframe: str, candles: list[Candle]) -> None:
+        """Replace a whole candle series (used by recovery/rebuild)."""
+        per_symbol = self._candles.setdefault(symbol, {})
+        series = deque(maxlen=self.max_candles)
+        for candle in sorted(candles, key=lambda c: c.timestamp):
+            series.append(candle)
+        per_symbol[timeframe] = series
+
     # -- queries ------------------------------------------------------------
     def snapshot(self, symbol: str) -> MarketSnapshot | None:
         return self._snapshots.get(symbol)

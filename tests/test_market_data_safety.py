@@ -51,38 +51,34 @@ async def test_invalid_crossed_quote_is_rejected():
 
 async def test_duplicate_trade_is_dropped():
     engine = _engine()
-    trades = _spy_on_trades(engine)
-    trade = Trade(timestamp=NOW, symbol=SYMBOL, price=100.0, size=1.0)
-    await engine.on_market_update(trade)
-    await engine.on_market_update(trade)  # exact replay
-    assert len(trades) == 1
+    await engine.on_market_update(Trade(timestamp=NOW, symbol=SYMBOL, price=100.0, size=1.0))
+    # Same timestamp, different price: must be rejected as a duplicate.
+    await engine.on_market_update(Trade(timestamp=NOW, symbol=SYMBOL, price=999.0, size=1.0))
+    assert engine.store.snapshot(SYMBOL).last == 100.0
 
 
 async def test_out_of_order_trade_is_dropped():
     engine = _engine()
-    trades = _spy_on_trades(engine)
     await engine.on_market_update(Trade(timestamp=NOW, symbol=SYMBOL, price=100.0, size=1.0))
     await engine.on_market_update(
-        Trade(timestamp=NOW - timedelta(seconds=30), symbol=SYMBOL, price=90.0, size=1.0)
+        Trade(timestamp=NOW - timedelta(seconds=30), symbol=SYMBOL, price=999.0, size=1.0)
     )
-    assert len(trades) == 1
+    assert engine.store.snapshot(SYMBOL).last == 100.0
 
 
 async def test_quote_and_trade_same_timestamp_are_both_accepted():
     """A paired quote+trade share one market moment; both must be processed."""
     engine = _engine()
-    trades = _spy_on_trades(engine)
     await engine.on_market_update(Quote(timestamp=NOW, symbol=SYMBOL, bid=99.0, ask=101.0))
     await engine.on_market_update(Trade(timestamp=NOW, symbol=SYMBOL, price=100.0, size=1.0))
-    assert engine.store.snapshot(SYMBOL) is not None
-    assert len(trades) == 1
+    snapshot = engine.store.snapshot(SYMBOL)
+    assert snapshot.bid == 99.0 and snapshot.last == 100.0
 
 
 async def test_advancing_ticks_are_accepted():
     engine = _engine()
-    trades = _spy_on_trades(engine)
     for i in range(3):
         await engine.on_market_update(
             Trade(timestamp=NOW + timedelta(seconds=i), symbol=SYMBOL, price=100.0 + i, size=1.0)
         )
-    assert len(trades) == 3
+    assert engine.store.snapshot(SYMBOL).last == 102.0

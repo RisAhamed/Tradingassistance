@@ -28,6 +28,11 @@ class EnvSettings(BaseSettings):
     config_path: str = "configs/config.yaml"
     trading_mode: str | None = None
 
+    # Phase C1: explicit real-data mode switch (see .env.example). Leaving these
+    # unset keeps the safe offline defaults (provider "none" for history).
+    market_data_provider: str | None = None
+    market_data_history_provider: str | None = None
+
     # --- Alpaca ---
     alpaca_api_key: str = ""
     alpaca_api_secret: str = ""

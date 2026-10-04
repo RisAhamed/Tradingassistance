@@ -109,6 +109,92 @@ def compute_warmup_requirement(config) -> WarmupRequirement:
         reasons=reasons,
     )
 
+@dataclass(slots=True)
+class CoverageReport:
+    """Explicit analysis of how complete a historical series actually is."""
+
+    requested: int
+    received: int
+    coverage_percent: float
+    first_at: datetime | None
+    last_at: datetime | None
+    expected_intervals: int
+    missing_intervals: int
+    largest_gap: int
+    gap_count: int
+    status: str  # PASS | WARNING | FAIL
+    reasons: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return {
+            "requested": self.requested,
+            "received": self.received,
+            "coverage_percent": round(self.coverage_percent, 4),
+            "first_at": self.first_at.isoformat() if self.first_at else None,
+            "last_at": self.last_at.isoformat() if self.last_at else None,
+            "expected_intervals": self.expected_intervals,
+            "missing_intervals": self.missing_intervals,
+            "largest_gap": self.largest_gap,
+            "gap_count": self.gap_count,
+            "status": self.status,
+            "reasons": list(self.reasons),
+        }
+
+
+def analyse_coverage(candles: list, *, requested: int, bar_minutes: int, policy) -> CoverageReport:
+    """Measure coverage of a historical series against the requested depth.
+
+    626/751 bars is reported as ~83% with its gaps counted — never silently
+    treated as equivalent to a complete series.
+    """
+    ordered = sorted(candles, key=lambda c: c.timestamp)
+    received = len(ordered)
+    reasons: list[str] = []
+    if received == 0:
+        return CoverageReport(
+            requested, 0, 0.0, None, None, 0, 0, 0, 0, "FAIL", ["no_candles"]
+        )
+
+    step = timedelta(minutes=bar_minutes)
+    expected_intervals = received - 1
+    gaps = 0
+    largest_gap = 0
+    missing_intervals = 0
+    for previous, current in zip(ordered, ordered[1:]):
+        delta = (current.timestamp - previous.timestamp) / step
+        skipped = int(round(delta)) - 1
+        if skipped > 0:
+            gaps += 1
+            missing_intervals += skipped
+            largest_gap = max(largest_gap, skipped)
+
+    coverage_percent = (received / requested * 100.0) if requested else 0.0
+    if coverage_percent < policy.minimum_percent:
+        reasons.append(f"coverage {coverage_percent:.1f}% < {policy.minimum_percent}%")
+    if largest_gap > policy.maximum_gap_candles:
+        reasons.append(f"largest gap {largest_gap} > {policy.maximum_gap_candles}")
+
+    if not reasons:
+        status = "PASS"
+    elif policy.on_insufficient == "fail":
+        status = "FAIL"
+    else:
+        status = "WARNING" if policy.on_insufficient == "warn" else "PASS"
+    return CoverageReport(
+        requested=requested,
+        received=received,
+        coverage_percent=coverage_percent,
+        first_at=ordered[0].timestamp,
+        last_at=ordered[-1].timestamp,
+        expected_intervals=expected_intervals,
+        missing_intervals=missing_intervals,
+        largest_gap=largest_gap,
+        gap_count=gaps,
+        status=status,
+        reasons=reasons,
+    )
+
+
 # -- Alpaca historical bars -------------------------------------------------
 class AlpacaHistoricalDataClient:
     """Fetches historical bars from Alpaca and normalises them to Candles.

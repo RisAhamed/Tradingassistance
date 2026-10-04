@@ -40,6 +40,18 @@ WATCHED = [
     EventType.LIVE_HANDOFF_STARTED,
     EventType.LIVE_HANDOFF_COMPLETED,
     EventType.DATA_GAP,
+    EventType.BAR_STREAM_CONNECTED,
+    EventType.BAR_STREAM_SUBSCRIBED,
+    EventType.BAR_REJECTED,
+    EventType.BAR_DUPLICATE,
+    EventType.BAR_OUT_OF_ORDER,
+    EventType.BAR_GAP_DETECTED,
+    EventType.HISTORICAL_COVERAGE_CHECKED,
+    EventType.HISTORICAL_COVERAGE_FAILED,
+    EventType.RECOVERY_STARTED,
+    EventType.RECOVERY_COMPLETED,
+    EventType.RECOVERY_FAILED,
+    EventType.DATA_GAP,
     EventType.ALPACA_CONNECTING,
     EventType.ALPACA_CONNECTED,
     EventType.ALPACA_SUBSCRIPTION_STARTED,
@@ -111,24 +123,35 @@ async def run(seconds: int) -> int:
     warmup_remaining = max(0, context_need - context_have)
 
     warm = engine.warmup_status()
+    streams = engine.stream_state()
+    readiness = engine.readiness()
+    bars_cfg = config.market_data.bars
     checks = [
-        # --- Phase C: historical warm-up -----------------------------------
+        # --- Phase C1: historical warm-up + coverage -------------------------
         ("W1. historical data requested", counts.get(EventType.WARMUP_REQUESTED.value, 0) > 0),
         ("W2. historical data received", counts.get(EventType.WARMUP_RECEIVED.value, 0) > 0),
-        ("W3. warm-up completed", warm.get("status") == "completed"),
-        ("W4. features ready from history", bool(warm.get("features_ready"))),
-        ("W5. regime ready from history", bool(warm.get("regime_ready"))),
-        # --- live stream ---------------------------------------------------
+        ("W3. coverage analysed", counts.get(EventType.HISTORICAL_COVERAGE_CHECKED.value, 0) > 0),
+        ("W4. warm-up completed", warm.get("status") == "completed"),
+        ("W5. features ready from history", bool(warm.get("features_ready"))),
+        ("W6. regime ready from history", bool(warm.get("regime_ready"))),
+        # --- Phase C1: live 1-minute bar stream ------------------------------
+        ("B1. bar stream connected", counts.get(EventType.BAR_STREAM_CONNECTED.value, 0) > 0),
+        ("B2. bars subscribed", counts.get(EventType.BAR_STREAM_SUBSCRIBED.value, 0) > 0),
+        ("B3. live bars arrived", engine._last_bar_at is not None),
+        ("B4. bar freshness meaningful", streams["bars"]["fresh"] is not None),
+        # --- live feed --------------------------------------------------------
         ("L1. Alpaca connects", counts.get(EventType.ALPACA_CONNECTED.value, 0) > 0),
         ("L2. subscription started", counts.get(EventType.ALPACA_SUBSCRIPTION_STARTED.value, 0) > 0),
         ("L3. live data arrived", snapshot is not None),
         ("L4. data normalized", bool(snapshot and snapshot.price and snapshot.price > 0)),
-        ("L5. handoff completed", warm.get("live_handoff") == "completed"),
-        ("L6. no excessive data gap", bool(warm.get("gap", {}).get("within_tolerance", True))),
-        # --- safety --------------------------------------------------------
+        ("L5. quotes observable separately", streams["quotes"]["last_at"] is not None),
+        ("L6. handoff completed", warm.get("live_handoff") == "completed"),
+        ("L7. no excessive data gap", bool(warm.get("gap", {}).get("within_tolerance", True))),
+        # --- safety -----------------------------------------------------------
         ("S1. execution disabled", payload["execution"]["status"] == "DISABLED"),
         ("S2. NO order created", len(engine.oms.all_orders()) == 0),
         ("S3. position flat", engine.position_manager.is_flat),
+        ("S4. strategy readiness reported", "strategy_ready" in readiness),
     ]
 
     print("\n--- MARKET STATE ---")

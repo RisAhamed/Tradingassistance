@@ -8,9 +8,10 @@ from __future__ import annotations
 import random
 from datetime import timedelta
 
-from app.core.clock import utcnow
-from app.domain.market import Quote, Trade
+from app.core.clock import floor_to_timeframe, utcnow
+from app.domain.market import Candle, Quote, Trade
 from app.market_data.base import MarketDataProvider, ProviderHealth
+from app.market_data.history import timeframe_minutes
 
 
 class MockMarketDataProvider(MarketDataProvider):
@@ -25,6 +26,8 @@ class MockMarketDataProvider(MarketDataProvider):
         tick_seconds: float = 1.0,
         seed: int = 7,
         size: float = 1.0,
+        bars_enabled: bool = False,
+        bar_timeframe: str = "1m",
     ) -> None:
         super().__init__()
         self.symbol = symbol
@@ -36,6 +39,11 @@ class MockMarketDataProvider(MarketDataProvider):
         self._connected = False
         self._last_at = None
         self._clock_offset = timedelta(0)
+        # Phase C1: mirror the real feed's canonical 1-minute bar stream.
+        self.bars_enabled = bars_enabled
+        self.bar_timeframe = bar_timeframe
+        self._last_bar_at: datetime | None = None
+        self._last_price: float | None = None
 
     async def connect(self, symbols: list[str]) -> None:
         self._connected = True
@@ -64,8 +72,34 @@ class MockMarketDataProvider(MarketDataProvider):
         )
         trade = Trade(timestamp=moment, symbol=self.symbol, price=price, size=self.size)
         self._last_at = moment
+        if self.bars_enabled:
+            await self._emit_bars(moment, price)
         await self._dispatch(quote)
         await self._dispatch(trade)
+
+    async def _emit_bars(self, moment: datetime, price: float) -> None:
+        """Emit one completed bar per elapsed base-timeframe interval."""
+        step = timedelta(minutes=timeframe_minutes(self.bar_timeframe))
+        bucket = floor_to_timeframe(moment, self.bar_timeframe)
+        if self._last_bar_at is None:
+            self._last_bar_at = bucket
+            self._last_price = price
+            return
+        while self._last_bar_at + step <= bucket:
+            self._last_bar_at = self._last_bar_at + step
+            open_price = self._last_price if self._last_price is not None else price
+            candle = Candle(
+                timestamp=self._last_bar_at,
+                symbol=self.symbol,
+                open=open_price,
+                high=max(open_price, price),
+                low=min(open_price, price),
+                close=price,
+                volume=self.size,
+                timeframe=self.bar_timeframe,
+            )
+            self._last_price = price
+            await self._dispatch(candle)
 
     async def pump_one(self) -> bool:
         """Emit the next scripted price; return False when exhausted."""

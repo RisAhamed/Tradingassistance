@@ -47,8 +47,20 @@ market_data:
   # Freshness MEASUREMENT (what the dashboard/health report). The risk decision
   # to BLOCK entries lives in risk.stale_market_data — kept separate on purpose.
   freshness:
-    threshold_seconds: 30      # data older than this is reported as STALE
+    threshold_seconds: 30           # PRIMARY: live 1m bar freshness
+    quote_threshold_seconds: 30     # quote stream (bid/ask/spread)
+    trade_threshold_seconds: 300    # trades are sparse on crypto
     stale_action: block_entries  # block_entries | warn_only
+  # Live 1-minute bar stream (Phase C1) — the CANONICAL strategy candle source.
+  bars:
+    enabled: true
+    canonical: true               # strategy candles come ONLY from bars
+    timeframe: "1m"
+    required: true
+    startup_timeout_seconds: 20
+    max_gap_candles: 3            # tolerated missing 1m bars before an outage
+    resync_enabled: true          # event-driven historical resync on large gap
+    resync_max_attempts: 2
   # Historical warm-up (start from a ready state instead of waiting hours).
   # provider "none" disables it; "alpaca" pulls 1-minute bars and derives the
   # configured timeframes from them.
@@ -61,6 +73,14 @@ market_data:
     maximum_history_bars: 10000
     startup_timeout_seconds: 30
     max_gap_candles: 5         # history->live gap tolerance (fail-closed)
+    # Explicit coverage analysis: 626/751 bars is NOT silently equal to 751/751.
+    coverage:
+      # Measured on the real Alpaca BTC/USD 1m feed: ~630/751 bars (83.9%) with
+      # 88 small holes and a largest gap of 4. The policy is explicit, not silent:
+      # below this percentage warm-up FAILS (fail-closed).
+      minimum_percent: 80.0
+      maximum_gap_candles: 5
+      on_insufficient: fail    # fail | warn | continue
   # Deterministic mock provider (paper/test only; used when provider: mock).
   mock:
     tick_seconds: 120        # synthetic market-time advanced per tick

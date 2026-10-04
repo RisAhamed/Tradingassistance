@@ -176,6 +176,13 @@ def create_router() -> APIRouter:
             "max_age_seconds": limit,
             "data_status": "STALE" if age is None or age > limit else "LIVE",
             "candles": candles,
+            "streams": engine.stream_state(_now()),
+            "bars": {
+                "enabled": runtime.config.market_data.bars.enabled,
+                "canonical": runtime.config.market_data.bars.canonical,
+                "timeframe": runtime.config.market_data.bars.timeframe,
+                "max_gap_candles": runtime.config.market_data.bars.max_gap_candles,
+            },
         }
 
     @router.get("/api/warmup")
@@ -187,6 +194,21 @@ def create_router() -> APIRouter:
             "freshness": runtime.config.market_data.freshness.model_dump(mode="json"),
             "risk_stale_threshold_seconds": runtime.config.risk.stale_market_data.maximum_age_seconds,
             "history": runtime.config.market_data.history.model_dump(mode="json"),
+        }
+
+    @router.get("/api/readiness")
+    async def readiness(request: Request):
+        runtime = _runtime(request)
+        engine = runtime.engine
+        return {
+            "readiness": engine.readiness(),
+            "streams": engine.stream_state(),
+            "coverage": engine.coverage,
+            "recovery": engine.recovery,
+            "execution": engine.execution_status(),
+            "bars": runtime.config.market_data.bars.model_dump(mode="json"),
+            "history": runtime.config.market_data.history.model_dump(mode="json"),
+            "freshness": runtime.config.market_data.freshness.model_dump(mode="json"),
         }
 
     @router.get("/api/config")

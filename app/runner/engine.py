@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.brokers.base import BrokerAdapter, BrokerExecution
@@ -31,7 +31,7 @@ from app.domain.enums import (
     SessionState,
     Side,
 )
-from app.domain.market import Quote, Trade
+from app.domain.market import Candle, Quote, Trade
 from app.domain.orders import Order, OrderIntent
 from app.domain.pnl import TradeRecord
 from app.domain.regime import RegimeSnapshot
@@ -45,6 +45,7 @@ from app.market_data.aggregator import CandleAggregator
 from app.market_data.base import MarketDataProvider, MarketUpdate
 from app.market_data.history import (
     AlpacaHistoricalDataClient,
+    analyse_coverage,
     compute_warmup_requirement,
     timeframe_minutes,
 )
@@ -102,6 +103,14 @@ class TradingEngine:
         self._last_historical_at: datetime | None = None
         self._live_handoff_done = False
         self._data_gap_ok = True
+        # Phase C1: per-stream freshness (never merged into one timestamp).
+        self._last_bar_at: datetime | None = None
+        self._last_quote_at: datetime | None = None
+        self._last_trade_at: datetime | None = None
+        self._expected_next_bar: datetime | None = None
+        self.coverage: dict = {}
+        self.recovery: dict = self._recovery_state()
+        self._recovering = False
 
         self.feature_engine = FeatureEngine(config.features)
         self.regime_engine = RegimeEngine(
@@ -399,6 +408,11 @@ class TradingEngine:
             if self._is_out_of_order(symbol, update.timestamp, "quote"):
                 return
             self.store.update_quote(update)
+            self._last_quote_at = update.timestamp
+        elif isinstance(update, Candle):
+            # Phase C1: the canonical strategy candle source.
+            await self._on_bar(update)
+            return
         elif isinstance(update, Trade):
             if update.price <= 0 or update.size < 0:
                 logger.warning(
@@ -423,14 +437,19 @@ class TradingEngine:
                 )
                 return
             self.store.update_trade(update)
+            self._last_trade_at = update.timestamp
             await self._on_live_handoff(update.timestamp)
-            closed = self.aggregator.add_trade(update)
-            for started in self._candle_started:
-                await self._emit_candle_started(started)
-            self._candle_started.clear()
-            for candle in closed:
-                self.store.add_candle(candle)
-                await self._on_candle_closed(candle)
+            if not self.config.market_data.bars.canonical:
+                # Phase C1: when the bar stream is canonical, individual trades do
+                # NOT build strategy candles — the candle clock no longer depends
+                # on trade arrival. Trades remain for price/microstructure only.
+                closed = self.aggregator.add_trade(update)
+                for started in self._candle_started:
+                    await self._emit_candle_started(started)
+                self._candle_started.clear()
+                for candle in closed:
+                    self.store.add_candle(candle)
+                    await self._on_candle_closed(candle)
         else:  # pragma: no cover - defensive
             logger.warning(
                 "unknown market update",
@@ -503,6 +522,66 @@ class TradingEngine:
         candles = self.store.candles(self.symbol, timeframe)
         snapshot = self.store.snapshot(self.symbol)
         return self.feature_engine.compute(candles, timeframe=timeframe, snapshot=snapshot, now=now)
+
+    async def _on_bar(self, candle: Candle) -> None:
+        """Validate a canonical 1-minute bar, detect gaps, and aggregate."""
+        symbol = candle.symbol
+        if symbol != self.symbol:
+            await self.bus.emit(EventType.BAR_REJECTED, payload={"reason": "unexpected_symbol"})
+            return
+        if candle.high < candle.low or candle.low <= 0 or candle.volume < 0:
+            await self.bus.emit(EventType.BAR_REJECTED, payload={"reason": "invalid_bar"})
+            return
+        last = self._last_update_at.get(f"{symbol}:bar")
+        if last is not None and candle.timestamp == last:
+            await self.bus.emit(EventType.BAR_DUPLICATE, payload={"timestamp": candle.timestamp.isoformat()})
+            return
+        if last is not None and candle.timestamp < last:
+            await self.bus.emit(EventType.BAR_OUT_OF_ORDER, payload={"timestamp": candle.timestamp.isoformat()})
+            return
+        self._last_update_at[f"{symbol}:bar"] = candle.timestamp
+
+        await self._detect_bar_gap(candle)
+
+        self._last_bar_at = candle.timestamp
+        self.store.upsert_candle(candle)
+        for derived in self.aggregator.add_candle(candle):
+            self.store.add_candle(derived)
+            await self._on_candle_closed(derived)
+
+    async def _detect_bar_gap(self, candle: Candle) -> None:
+        """Compare the incoming bar against the expected next base candle."""
+        step = timedelta(minutes=timeframe_minutes(self.config.market_data.bars.timeframe))
+        expected = self._expected_next_bar
+        self._expected_next_bar = candle.timestamp + step
+        if expected is None:
+            return
+        missing = int(round((candle.timestamp - expected) / step))
+        if missing <= 0:
+            return  # normal 1-minute progression is NOT an outage
+        allowed = self.config.market_data.bars.max_gap_candles
+        await self.bus.emit(
+            EventType.BAR_GAP_DETECTED,
+            payload={"expected": expected.isoformat(), "actual": candle.timestamp.isoformat(), "missing": missing},
+        )
+        logger.warning(
+            "BAR GAP DETECTED",
+            extra={
+                "structured": {
+                    "event": "BAR_GAP_DETECTED",
+                    "component": "engine",
+                    "missing_bars": missing,
+                    "allowed": allowed,
+                }
+            },
+        )
+        if missing > allowed:
+            # Do NOT resume trading just because the socket reconnected: halt
+            # entries and run an event-driven historical resync.
+            self._data_gap_ok = False
+            await self.bus.emit(EventType.DATA_GAP, payload={"missing_bars": missing, "allowed": allowed})
+            if self.config.market_data.bars.resync_enabled and not self._recovering:
+                await self.resync(reason=f"live_bar_gap:{missing}")
 
     async def _emit_candle_started(self, candle) -> None:
         """Phase B #5: a new candle bucket opened (symbol + timeframe)."""
@@ -779,6 +858,25 @@ class TradingEngine:
             candles={tf: len(built.get(tf, [])) for tf in self.timeframes},
         )
 
+        # Phase C1: explicit coverage analysis — 626/751 is NOT silently equivalent
+        # to 751/751.
+        report = analyse_coverage(
+            candles,
+            requested=bars,
+            bar_minutes=timeframe_minutes(requirement.history_timeframe),
+            policy=history.coverage,
+        )
+        self.coverage = report.as_dict()
+        await self._warmup_event(
+            EventType.HISTORICAL_COVERAGE_CHECKED,
+            "HISTORICAL COVERAGE CHECKED",
+            **report.as_dict(),
+        )
+        if report.status == "FAIL":
+            self.warmup["coverage"] = report.as_dict()
+            await self._warmup_failed("insufficient_coverage:" + ";".join(report.reasons))
+            return False
+
         features = self._features_for(self.config.timeframes.signal, utcnow())
         self.state.features = features
         features_ready = bool(features.ready)
@@ -821,6 +919,13 @@ class TradingEngine:
         self._last_historical_at = candles[-1].timestamp
         self._live_handoff_done = False
         self._last_update_at[f"{self.symbol}:trade"] = self._last_historical_at
+        # The historical series IS the base bar series: arm the bar watermark and
+        # the expected next bar so the first live bar is validated against it.
+        base_tf = self.config.market_data.bars.timeframe
+        self._last_update_at[f"{self.symbol}:bar"] = self._last_historical_at
+        self._last_bar_at = self._last_historical_at
+        self._expected_next_bar = None
+        self.warmup["coverage"] = dict(self.coverage)
 
         self.warmup.update(
             {
@@ -957,6 +1062,160 @@ class TradingEngine:
         status["execution"] = self.execution_status()["status"]
         return status
 
+    def _recovery_state(self) -> dict:
+        return {"state": "idle", "reason": None, "started_at": None, "completed_at": None, "detail": None}
+
+    async def resync(self, *, reason: str) -> bool:
+        """Event-driven recovery after a large live-data gap.
+
+        Halt entries -> fetch missing historical bars -> repair candle history ->
+        rebuild features -> rebuild regime -> verify -> restore readiness. A
+        websocket reconnect alone never restores readiness.
+        """
+        if self._recovering:
+            return False
+        self._recovering = True
+        self._data_gap_ok = False
+        history = self.config.market_data.history
+        bars_cfg = self.config.market_data.bars
+        self.recovery = self._recovery_state()
+        self.recovery.update({"state": "running", "reason": reason, "started_at": utcnow().isoformat()})
+        await self._warmup_event(EventType.RECOVERY_STARTED, "RECOVERY STARTED", reason=reason)
+        try:
+            step = timeframe_minutes(bars_cfg.timeframe)
+            anchor = self._last_bar_at or self._last_historical_at or utcnow()
+            missing = max(2, int((utcnow() - anchor).total_seconds() // (step * 60)) + 2)
+            if history.provider == "none":
+                raise RuntimeError("historical provider is 'none'; resync impossible")
+            candles = await self.history_client.fetch_candles(
+                symbol=self.symbol,
+                bars=missing,
+                timeframe=bars_cfg.timeframe,
+                timeout_seconds=history.startup_timeout_seconds,
+            )
+            await self._warmup_event(
+                EventType.RECOVERY_HISTORICAL_FETCH, "RECOVERY HISTORICAL FETCH", received=len(candles)
+            )
+            self._repair_history(candles)
+            await self._warmup_event(
+                EventType.RECOVERY_CANDLE_REBUILD, "RECOVERY CANDLE REBUILD", base=len(candles)
+            )
+            features_ok = await self._rebuild_features()
+            regime_ok = await self._rebuild_regime()
+            if not (features_ok and regime_ok):
+                raise RuntimeError("post-resync verification failed (features/regime)")
+            self._data_gap_ok = True
+            self.recovery.update({"state": "completed", "completed_at": utcnow().isoformat()})
+            await self._warmup_event(EventType.RECOVERY_COMPLETED, "RECOVERY COMPLETED", reason=reason)
+            return True
+        except Exception as exc:  # noqa: BLE001 - fail closed, stay not-ready
+            self.recovery.update({"state": "failed", "completed_at": utcnow().isoformat(), "detail": str(exc)})
+            logger.critical(
+                "RECOVERY FAILED",
+                extra={
+                    "structured": {
+                        "event": "RECOVERY_FAILED",
+                        "component": "engine",
+                        "reason": reason,
+                        "error": str(exc),
+                    }
+                },
+            )
+            await self.bus.emit(EventType.RECOVERY_FAILED, payload={"reason": reason, "error": str(exc)})
+            return False
+        finally:
+            self._recovering = False
+
+    def _repair_history(self, candles: list) -> None:
+        """Merge repaired bars into the base series and rebuild derived timeframes."""
+        base_tf = self.config.market_data.bars.timeframe
+        merged = {c.timestamp: c for c in self.store.candles(self.symbol, base_tf)}
+        for candle in candles:
+            merged[candle.timestamp] = candle
+        ordered = [merged[key] for key in sorted(merged)]
+        self.store.replace_candles(self.symbol, base_tf, ordered)
+        for timeframe in self.timeframes:
+            if timeframe == base_tf:
+                continue
+            # Replay the FULL repaired base series so the derived series is rebuilt
+            # in its entirety (closed candles + the in-progress one) rather than
+            # truncated to the current bucket.
+            aggregator = CandleAggregator(self.symbol, [timeframe])
+            derived: list = []
+            for candle in ordered:
+                derived.extend(aggregator.add_candle(candle))
+            current = aggregator.current(timeframe)
+            if current is not None:
+                derived.append(current)
+            self.store.replace_candles(self.symbol, timeframe, derived)
+        if ordered:
+            self._last_bar_at = ordered[-1].timestamp
+
+    async def _rebuild_features(self) -> bool:
+        """Recompute features from the repaired series (never reuse stale values)."""
+        await self._warmup_event(EventType.FEATURE_REBUILD_STARTED, "FEATURE REBUILD STARTED")
+        features = self._features_for(self.config.timeframes.signal, utcnow())
+        self.state.features = features
+        ready = bool(features.ready)
+        await self._warmup_event(
+            EventType.FEATURE_REBUILD_COMPLETED,
+            "FEATURE REBUILD COMPLETED",
+            ready=ready,
+            missing=features.missing,
+        )
+        return ready
+
+    async def _rebuild_regime(self) -> bool:
+        """Recompute the regime from the rebuilt context features."""
+        await self._warmup_event(EventType.REGIME_REBUILD_STARTED, "REGIME REBUILD STARTED")
+        context_features = self._features_for(self.config.timeframes.context, utcnow())
+        regime = self.regime_engine.classify(context_features, now=utcnow())
+        self.state.record_regime(regime)
+        await self._warmup_event(
+            EventType.REGIME_REBUILD_COMPLETED,
+            "REGIME REBUILD COMPLETED",
+            regime=regime.regime.value,
+            unknown=regime.is_unknown,
+        )
+        return not regime.is_unknown
+
+    def stream_state(self, now: datetime | None = None) -> dict:
+        """Per-stream freshness — bars, quotes and trades reported separately."""
+        now = now or utcnow()
+        freshness = self.config.market_data.freshness
+
+        def _stream(last: datetime | None, threshold: float) -> dict:
+            age = None if last is None else round((now - last).total_seconds(), 3)
+            return {
+                "last_at": last.isoformat() if last else None,
+                "age_seconds": age,
+                "fresh": age is not None and age <= threshold,
+                "threshold_seconds": threshold,
+            }
+
+        return {
+            "bars": _stream(self._last_bar_at, freshness.threshold_seconds),
+            "quotes": _stream(self._last_quote_at, freshness.quote_threshold_seconds),
+            "trades": _stream(self._last_trade_at, freshness.trade_threshold_seconds),
+        }
+
+    def readiness(self) -> dict:
+        """Aggregate readiness shown on the dashboard / API."""
+        features = self.state.features
+        regime = self.state.regime
+        strategy_ready = bool(features and features.ready and regime and not regime.is_unknown)
+        return {
+            "warmup_ready": self.warmup.get("status") == "completed",
+            "features_ready": bool(features and features.ready),
+            "regime_ready": bool(regime and not regime.is_unknown),
+            "regime": regime.regime.value if regime else None,
+            "strategy_ready": strategy_ready,
+            "execution": self.execution_status()["status"],
+            "data_integrity_ok": self._data_gap_ok,
+            "recovery_state": self.recovery.get("state"),
+            "orders": len(self.oms.all_orders()),
+        }
+
     # -- risk gate ----------------------------------------------------------
     def _build_risk_context(self, now: datetime) -> RiskContext:
         age = self.store.data_age(self.symbol, now)
@@ -964,7 +1223,14 @@ class TradingEngine:
         # `market_data.freshness.stale_action` decides whether losing freshness
         # actually blocks entries or only warns.
         freshness = self.config.market_data.freshness
-        measured = age is not None and age <= self.config.risk.stale_market_data.maximum_age_seconds
+        if self.config.market_data.bars.enabled and self._last_bar_at is not None:
+            # Phase C1: entries are gated on BAR freshness (canonical source), not
+            # on sparse trade arrival.
+            bar_age = (now - self._last_bar_at).total_seconds()
+            measured = bar_age <= self.config.risk.stale_market_data.maximum_age_seconds
+        else:
+            age = self.store.data_age(self.symbol, now)
+            measured = age is not None and age <= self.config.risk.stale_market_data.maximum_age_seconds
         fresh = measured if freshness.stale_action == "block_entries" else True
         if not self._data_gap_ok:
             fresh = False
@@ -1643,6 +1909,11 @@ class TradingEngine:
         # The entry-BLOCKING decision stays in risk.stale_market_data and is
         # applied in _build_risk_context — measurement and policy are separate.
         limit = self.config.market_data.freshness.threshold_seconds
+        if self.config.market_data.bars.enabled and self._last_bar_at is not None:
+            # Phase C1: primary strategy freshness is the BAR stream, not trades.
+            age = (now - self._last_bar_at).total_seconds()
+        else:
+            age = self.store.data_age(self.symbol, now)
         stale = age is None or age > limit
         if stale and not self._stale_flag:
             self._stale_flag = True
@@ -1727,6 +1998,10 @@ class TradingEngine:
         data["paper_trading_only"] = True
         data["execution"] = self.execution_status()
         data["warmup"] = self.warmup_status()
+        data["streams"] = self.stream_state()
+        data["coverage"] = dict(self.coverage)
+        data["recovery"] = dict(self.recovery)
+        data["readiness"] = self.readiness()
         return data
 
     @property

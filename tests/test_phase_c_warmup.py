@@ -222,7 +222,10 @@ async def test_insufficient_history_fails_closed():
     _stub_history(engine, _history(30))  # nowhere near the requirement
     assert await engine.warm_up() is False
     assert engine.warmup["status"] == "failed"
-    assert engine.warmup["reason"] == "insufficient_history"
+    # Either the coverage policy or the readiness policy rejects it — both fail closed.
+    assert engine.warmup["reason"].startswith(
+        ("insufficient_history", "insufficient_coverage")
+    )
     assert engine.oms.all_orders() == []
 
 

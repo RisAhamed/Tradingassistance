@@ -19,10 +19,10 @@ import asyncio
 import inspect
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.config.models import ReconnectConfig
-from app.domain.market import Quote, Trade
+from app.domain.market import Candle, Quote, Trade
 from app.events.types import EventType
 from app.market_data.base import MarketDataProvider, ProviderHealth
 
@@ -40,6 +40,8 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         feed: str = "crypto",
         reconnect: ReconnectConfig | None = None,
         bus=None,
+        bars_enabled: bool = False,
+        bar_timeframe: str = "1m",
     ) -> None:
         super().__init__()
         if not api_key or not api_secret:
@@ -50,6 +52,10 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         self.feed = feed
         self.reconnect = reconnect or ReconnectConfig()
         self._bus = bus
+        # Phase C1: the live 1-minute bar stream (canonical candle source).
+        self.bars_enabled = bars_enabled
+        self.bar_timeframe = bar_timeframe
+        self._bars_seen = 0
         self._symbols: list[str] = []
         self._stream = None
         self._task: asyncio.Task | None = None
@@ -109,7 +115,63 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         self._connected = False
 
     def health(self) -> ProviderHealth:
-        return ProviderHealth(connected=self._connected, detail=f"feed={self.feed}", last_message_at=self._last_at)
+        detail = f"feed={self.feed}"
+        if self.bars_enabled:
+            detail += f" bars={self.bar_timeframe} seen={self._bars_seen}"
+        return ProviderHealth(connected=self._connected, detail=detail, last_message_at=self._last_at)
+
+    # -- live bars (Phase C1 canonical candle source) -----------------------
+    async def _on_bar(self, data) -> None:
+        """Normalise an Alpaca bar message into the internal Candle model."""
+        try:
+            bars = data if isinstance(data, list) else [data]
+            for raw in bars:
+                symbol = str(getattr(raw, "symbol", "") or "")
+                if symbol not in self._symbols:
+                    self._reject("bar", "unexpected_symbol", symbol=symbol)
+                    continue
+                timestamp = getattr(raw, "timestamp", None)
+                o = getattr(raw, "open", None)
+                h = getattr(raw, "high", None)
+                low = getattr(raw, "low", None)
+                c = getattr(raw, "close", None)
+                if timestamp is None or None in (o, h, low, c):
+                    self._reject("bar", "missing_fields", symbol=symbol)
+                    continue
+                if not all(math.isfinite(float(v)) for v in (o, h, low, c)):
+                    self._reject("bar", "non_finite", symbol=symbol)
+                    continue
+                if float(h) < float(low):
+                    self._reject("bar", "inconsistent_ohlc", symbol=symbol)
+                    continue
+                candle = Candle(
+                    timestamp=timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc),
+                    symbol=symbol,
+                    open=float(o),
+                    high=float(h),
+                    low=float(low),
+                    close=float(c),
+                    volume=float(getattr(raw, "volume", 0.0) or 0.0),
+                    timeframe=self.bar_timeframe,
+                )
+                self._last_at = candle.timestamp
+                self._bars_seen += 1
+                # High-frequency: never logged at INFO.
+                logger.debug(
+                    "bar received",
+                    extra={
+                        "structured": {
+                            "event": "BAR_RECEIVED",
+                            "component": "market_data.alpaca",
+                            "symbol": symbol,
+                            "timeframe": self.bar_timeframe,
+                            "timestamp": candle.timestamp.isoformat(),
+                        }
+                    },
+                )
+                await self._dispatch(candle)
+        except (TypeError, ValueError) as exc:
+            self._reject("bar", f"malformed:{exc}")
 
     @property
     def rejected_count(self) -> int:
@@ -183,6 +245,10 @@ class AlpacaMarketDataProvider(MarketDataProvider):
             stream = StockDataStream(self._api_key, self._api_secret, feed=self.feed)
         stream.subscribe_quotes(self._on_quote, *self._symbols)
         stream.subscribe_trades(self._on_trade, *self._symbols)
+        if self.bars_enabled:
+            # Alpaca's live bar subscription is 1-minute by default — exactly the
+            # canonical strategy candle source we want.
+            stream.subscribe_bars(self._on_bar, *self._symbols)
         return stream
 
     async def _run_forever(self) -> None:
@@ -208,6 +274,19 @@ class AlpacaMarketDataProvider(MarketDataProvider):
                     f"SUBSCRIBED {','.join(self._symbols)}",
                     symbols=",".join(self._symbols),
                 )
+                if self.bars_enabled:
+                    await self._emit(
+                        EventType.BAR_STREAM_CONNECTED,
+                        "bar stream connected",
+                        symbols=",".join(self._symbols),
+                        timeframe=self.bar_timeframe,
+                    )
+                    await self._emit(
+                        EventType.BAR_STREAM_SUBSCRIBED,
+                        f"BARS SUBSCRIBED {','.join(self._symbols)}",
+                        symbols=",".join(self._symbols),
+                        timeframe=self.bar_timeframe,
+                    )
                 self._connected = True
                 if attempt > 0:
                     await self._emit(EventType.ALPACA_RECONNECTED, "alpaca reconnected", attempt=attempt)

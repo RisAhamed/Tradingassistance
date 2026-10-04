@@ -95,14 +95,24 @@ class MockMarketConfig(_Section):
     seed: int = 7
 
 
-class HistoricalDataConfig(_Section):
-    """Historical warm-up bars (Phase C).
+class CoveragePolicyConfig(_Section):
+    """How much historical coverage is acceptable before trading may proceed."""
 
-    ``provider: none`` disables warm-up entirely. ``required: true`` makes a failed
-    warm-up a readiness failure (fail-closed). ``lookback_bars: null`` means the
-    required depth is *derived* from the configured pipeline (EMA/RSI/ATR/lookbacks)
-    rather than hardcoded.
-    """
+    minimum_percent: float = 90.0
+    maximum_gap_candles: int = 5
+    # fail -> warm-up fails (not ready) | warn -> proceed but flagged | continue -> proceed
+    on_insufficient: Literal["fail", "warn", "continue"] = "fail"
+
+    @field_validator("minimum_percent")
+    @classmethod
+    def _percent_range(cls, value: float) -> float:
+        if not 0.0 < value <= 100.0:
+            raise ValueError("coverage.minimum_percent must be in (0, 100]")
+        return value
+
+
+class HistoricalDataConfig(_Section):
+    """Historical warm-up bars (Phase C) and coverage policy (Phase C1)."""
 
     enabled: bool = True
     provider: Literal["alpaca", "none"] = "none"
@@ -114,23 +124,37 @@ class HistoricalDataConfig(_Section):
     # A gap larger than this many base candles between the last historical bar and
     # the first live update marks the data as not trustworthy for trading.
     max_gap_candles: int = 5
+    coverage: CoveragePolicyConfig = Field(default_factory=CoveragePolicyConfig)
 
-    @model_validator(mode="after")
-    def _provider_needs_credentials(self) -> "HistoricalDataConfig":
-        if self.enabled and self.provider != "none" and not self.bar_timeframe:
-            raise ValueError("market_data.history.bar_timeframe is required when warm-up is enabled")
-        return self
+
+class LiveBarsConfig(_Section):
+    """Phase C1: Alpaca live bar stream — the canonical strategy candle source."""
+
+    enabled: bool = True
+    # When true, strategy candles are built ONLY from bars; trades no longer
+    # create candles (they remain available for price/spread/microstructure).
+    canonical: bool = True
+    timeframe: str = "1m"
+    required: bool = True
+    startup_timeout_seconds: float = 20.0
+    # Consecutive missing base candles tolerated before an outage is declared.
+    max_gap_candles: int = 3
+    # Halt entries and run an event-driven historical resync on a large gap.
+    resync_enabled: bool = True
+    resync_max_attempts: int = 2
 
 
 class DataFreshnessConfig(_Section):
     """Separates *measuring* freshness from *risk policy* on stale data.
 
-    ``threshold_seconds`` is the measurement used for monitoring/dashboard.
-    The blocking decision belongs to ``risk.stale_market_data`` — this only says
-    what to DO about it once freshness is lost.
+    Freshness is measured per stream (bars is the primary, strategy-relevant
+    one) so the three are never merged into one misleading timestamp. The
+    blocking decision belongs to ``risk.stale_market_data``.
     """
 
-    threshold_seconds: float = 30.0
+    threshold_seconds: float = 30.0            # primary: live 1m bars
+    quote_threshold_seconds: float = 30.0
+    trade_threshold_seconds: float = 300.0      # trades are sparse on crypto
     stale_action: Literal["block_entries", "warn_only"] = "block_entries"
 
 
@@ -141,6 +165,7 @@ class MarketDataConfig(_Section):
     reconnect: ReconnectConfig = Field(default_factory=ReconnectConfig)
     freshness: DataFreshnessConfig = Field(default_factory=DataFreshnessConfig)
     history: HistoricalDataConfig = Field(default_factory=HistoricalDataConfig)
+    bars: LiveBarsConfig = Field(default_factory=LiveBarsConfig)
     mock: MockMarketConfig = Field(default_factory=MockMarketConfig)
 
 

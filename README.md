@@ -468,6 +468,62 @@ Run it yourself:
 .\.venv\Scripts\python.exe scripts\acceptance_alpaca.py --seconds 240
 ```
 
+## Phase C1 — canonical live 1-minute bars, coverage & recovery
+
+Strategy candles now come from Alpaca's **live 1-minute bar stream**, not from
+individual trade arrivals.
+
+```text
+ALPACA 1m BAR -> NORMALIZE -> VALIDATE -> CANDLE STORE -> 5m/15m AGGREGATION
+              -> FEATURES -> REGIME -> STRATEGY
+```
+
+```yaml
+market_data:
+  bars:
+    enabled: true
+    canonical: true        # strategy candles come ONLY from bars
+    timeframe: "1m"
+    required: true
+    max_gap_candles: 3     # tolerated missing bars before an outage
+    resync_enabled: true   # event-driven historical resync on a large gap
+  freshness:
+    threshold_seconds: 30           # PRIMARY: live 1m bar freshness
+    quote_threshold_seconds: 30     # quotes (bid/ask/spread)
+    trade_threshold_seconds: 300    # trades are sparse on crypto
+    stale_action: block_entries
+  history:
+    coverage:
+      minimum_percent: 80.0         # measured real-feed value (83.6%)
+      maximum_gap_candles: 5
+      on_insufficient: fail         # fail | warn | continue
+```
+
+**Real-data mode** is an explicit switch (no Python edits, no secrets):
+
+```powershell
+# .env
+MARKET_DATA_PROVIDER=alpaca
+MARKET_DATA_HISTORY_PROVIDER=alpaca
+```
+
+Leaving them unset keeps the safe offline defaults (`history.provider: none`).
+
+- **Freshness is measured per stream** — `bar_freshness`, `quote_freshness`,
+  `trade_freshness` are reported separately and never merged into one timestamp.
+  Entry blocking still uses the risk threshold (`risk.stale_market_data`) and
+  now keys off **bar** freshness when bars are enabled.
+- **Coverage is explicit** — `requested / received / coverage% / first / last /
+  missing_intervals / largest_gap / gap_count` with a `PASS|WARNING|FAIL` verdict.
+  A short series is never silently treated as a complete one.
+- **Gap handling** — normal 1-minute progression is not an outage. Beyond
+  `max_gap_candles`: `BAR_GAP_DETECTED` -> `DATA_GAP` -> entries blocked ->
+  `resync()` -> historical fetch -> candle rebuild -> feature rebuild -> regime
+  rebuild -> verify -> readiness restored. A socket reconnect alone never
+  restores readiness.
+- **Mock parity** — the mock provider emits the same canonical bars, so the demo
+  rehearses the production path.
+
 ## Configuration — one source of truth
 
 Two layers, deliberately separated:

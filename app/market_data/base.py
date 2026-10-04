@@ -10,9 +10,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 
-from app.domain.market import Quote, Trade
+from app.domain.market import Candle, Quote, Trade
 
-MarketUpdate = Quote | Trade
+# Phase C1: a normalized 1-minute bar is a first-class market update, so the rest
+# of the application keeps using the existing domain models (no second model).
+MarketUpdate = Quote | Trade | Candle
 UpdateHandler = Callable[[MarketUpdate], Awaitable[None] | None]
 
 

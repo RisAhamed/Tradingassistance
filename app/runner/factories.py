@@ -28,6 +28,8 @@ def create_provider(config: AppConfig, env: EnvSettings, bus=None) -> MarketData
             spread_percent=config.risk.maximum_spread_percent,
             tick_seconds=mock.tick_seconds,
             seed=mock.seed,
+            bars_enabled=config.market_data.bars.enabled,
+            bar_timeframe=config.market_data.bars.timeframe,
         )
     if provider == "alpaca":
         if not env.has_alpaca_credentials():
@@ -42,6 +44,8 @@ def create_provider(config: AppConfig, env: EnvSettings, bus=None) -> MarketData
             feed=config.market_data.feed,
             reconnect=config.market_data.reconnect,
             bus=bus,
+            bars_enabled=config.market_data.bars.enabled,
+            bar_timeframe=config.market_data.bars.timeframe,
         )
     raise ConfigError(f"unsupported market data provider: {provider}")
 

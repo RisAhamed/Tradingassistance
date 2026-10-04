@@ -60,6 +60,47 @@ class CandleAggregator:
         if self.on_candle_started is not None:
             self.on_candle_started(candle)
 
+    def add_candle(self, candle: Candle) -> list[Candle]:
+        """Fold a *completed* base candle into the higher timeframes.
+
+        Phase C1: with the Alpaca 1-minute bar stream as the canonical source,
+        derived timeframes are built from bars rather than from individual
+        trades — but through this same aggregator, so there is only one
+        aggregation implementation. Returns any derived candles that closed.
+        """
+        closed: list[Candle] = []
+        for timeframe in self.timeframes:
+            if timeframe == candle.timeframe:
+                continue  # the base candle is already complete
+            bucket = floor_to_timeframe(candle.timestamp, timeframe)
+            current = self._current.get(timeframe)
+            if current is None:
+                self._current[timeframe] = self._candle_from(candle, bucket, timeframe)
+                self._remember(timeframe)
+            elif bucket > current.timestamp:
+                closed.append(current)
+                self._current[timeframe] = self._candle_from(candle, bucket, timeframe)
+            elif bucket == current.timestamp:
+                current.high = max(current.high, candle.high)
+                current.low = min(current.low, candle.low)
+                current.close = candle.close
+                current.volume += candle.volume
+            # bucket < current.timestamp: late bar, ignored (never rewritten)
+        return closed
+
+    @staticmethod
+    def _candle_from(source: Candle, bucket, timeframe: str) -> Candle:
+        return Candle(
+            timestamp=bucket,
+            symbol=source.symbol,
+            open=source.open,
+            high=source.high,
+            low=source.low,
+            close=source.close,
+            volume=source.volume,
+            timeframe=timeframe,
+        )
+
     def current(self, timeframe: str) -> Candle | None:
         return self._current.get(timeframe)
 
