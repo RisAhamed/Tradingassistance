@@ -1,66 +1,413 @@
-# Trading Agent — systematic PAPER-TRADING system (Alpaca paper + Ollama supervision)
+# Trading Agent — systematic PAPER-TRADING system
 
-> **PAPER_TRADING_ONLY.** No live-trading switch exists.
-> The engine refuses to start against live endpoints.
+> **PAPER_TRADING_ONLY.** There is deliberately no live-trading switch. The
+> configuration model refuses anything but `mode: paper`, and the engine
+> refuses to start against a live Alpaca endpoint. This is an
+> architecture-validation project, **not** a profitability claim.
 
-## What this is
-
-A modular, configuration-driven paper-trading app for `BTC/USD` (crypto,
-Alpaca paper broker) running a deterministic pipeline:
+A modular, configuration-driven paper-trading agent (default `BTC/USD`, crypto)
+built around one deterministic pipeline. Intelligence = deterministic algorithms
+plus an optional event-driven AI supervisor (Ollama) that can only act through a
+permission-checked tool gateway.
 
 ```text
 MARKET DATA -> NORMALIZATION -> FEATURES -> REGIME -> STRATEGY -> SIGNAL ->
 RISK -> POSITION SIZE -> OMS -> BROKER -> FILL -> POSITION -> P&L
 ```
 
-* No ML price-prediction models. Intelligence = deterministic algorithms plus
-  an event-driven AI supervisor (Ollama) with permission-checked tools.
-* Session model enforces `POSITION = 0` at session end (cutoff -> flatten ->
-  verify -> retry -> critical alert).
-* Every important action is structured-logged and persisted (SQLite) for the
-  Signal -> RiskDecision -> Order -> Fill -> Position -> Trade -> P&L chain.
+- No ML price prediction. Every trading decision is deterministic and explainable.
+- The AI can **never** place trades, bypass risk, or call the broker directly.
+- The session model enforces `POSITION == 0` at session end
+  (`cutoff -> flatten -> verify -> retry -> critical alert`).
+- Every important state transition is structured-logged and persisted (SQLite)
+  along the full chain: Signal -> RiskDecision -> Order -> Fill -> Position ->
+  Trade -> P&L.
+
+## Status
+
+| Area | State |
+| --- | --- |
+| Phase A baseline hardening | **Complete** (regime/feature/market-data/risk/sizing/order/fill/session/reconcile/AI safety + config source-of-truth) |
+| Automated tests | **66 passing** (`pytest tests`) |
+| `scripts/demo_mock.py` (offline, deterministic) | **Passing** — signals → orders → trade → verified flat |
+| `python -m app.backtesting.run --length 600` (synthetic) | **Passing** — 35 signals, 26 entries |
+| FastAPI + SSE + dashboard | **Working** |
+| Alpaca **paper** broker + Alpaca market-data adapters | Wired (require credentials) |
+| Live Alpaca market data | **Disabled in this phase** (mock provider is the default for offline runs) |
+| Live execution | **Not implemented / not permitted** |
+| AI flatten permission | **Disabled by configuration** (`ai.permissions.allow_flatten: false`) |
+
+> The backtest/demo P&L is generated from synthetic data and only proves the
+> pipeline executes end-to-end. It is **not** evidence of strategy edge.
 
 ## Quickstart (Windows PowerShell)
 
 ```powershell
+# 1) Create the virtualenv (Python 3.11+)
+py -3.11 -m venv .venv
+
+# 2) Install dependencies (writes logs\pip_install.log)
 .\scripts\install_deps.bat
-Copy-Item .env.example .env   # fill in secrets; NEVER commit .env
+#   ...or equivalently:
+#   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# 3) Create your secrets file (NEVER commit .env)
+Copy-Item .env.example .env
+#   Fill in ALPACA_* only if you want the Alpaca paper/market-data adapters.
+
+# 4) Run the offline, fully-deterministic demo (no network, no credentials)
 .\.venv\Scripts\python.exe scripts\demo_mock.py
-.\.venv\Scripts\python.exe -m app.backtesting.run --length 600 --pretty
-
-## Verified runs (deterministic, offline)
-
-* backtest (synthetic seed=7, 600x 5m): 26 entries, net +1895.11 (+1.90%),
-  21W/5L, profit_factor 6.73 — proves the pipeline executes, not profitability.
-* demo_mock (600 mock ticks): 5 signals, 2 orders, 1 trade, flatten verified.
-* pytest: risk-exposure regression, engine pipeline, API surface — all pass.
-
-## Layout
-
-`app/api` REST+SSE, `app/ai_supervisor` Ollama+gateway, `app/backtesting`
-shared-code engine, `app/brokers` Alpaca paper + mock, `app/config` YAML+env,
-`app/runner` TradingEngine, `app/sessions` flat-at-end manager,
-`dashboard/index.html` live dashboard, `scripts/demo_mock.py` offline demo.
-
-## Safety
-
-Paper-only enforcement at load; startup checklist gates trading; risk is
-fail-closed and authoritative; ambiguous submissions trigger reconciliation
-(never blind retry); restart reconciles broker vs internal state; human
-controls share the AI's permission-checked command layer.
-
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m app
-# open http://127.0.0.1:8000/dashboard
 ```
 
-Headless paper runner: `.\.venv\Scripts\python.exe -m app.runner.paper --ticks 600`
+No API keys are required for the mock demo, the backtest, or the test suite.
 
-## Configuration
+## How to run and test
 
-* Behaviour: `configs/config.yaml` (single source of truth).
-* Secrets only: `.env` (`ALPACA_*`, `OLLAMA_*`, `DATABASE_URL`).
-* Key knobs: `trading.mode=paper`, session cutoff/flatten times, risk limits
-  (`risk_per_trade`, `max_daily_loss`, `maximum_position_value_percent`),
-  sizing (`risk_amount / stop_distance`, capped to max notional), AI
-  permissions, timeframes (`15m` context / `5m` signal / `1m` execution).
+All commands are run from the repository root. On Windows use
+`.\.venv\Scripts\python.exe`; on macOS/Linux use `.venv/bin/python`.
+
+### Run the automated tests
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest            # or: .\.venv\Scripts\python.exe -m pytest tests -q
+```
+
+- Config lives in `pyproject.toml` (`asyncio_mode = "auto"`, `testpaths = ["tests"]`).
+- No network/credentials needed — tests use the mock provider/broker and an
+  offline AI provider. Expect **66 passed**.
+
+Coverage by file (the safety contract is executable here):
+
+| Test file | Guards |
+| --- | --- |
+| `test_regime_feature_safety.py` | UNKNOWN regime never claims `bullish_regime`/`bearish_regime`; missing/insufficient/stale features never signal |
+| `test_market_data_safety.py` | wrong symbol / invalid / duplicate / out-of-order ticks cannot trade; paired quote+trade accepted |
+| `test_risk_exposure.py` | exposure gate defers to sizing; notional cap enforced post-sizing; backtest produces trades |
+| `test_sizing_oms_safety.py` | malformed sizing inputs; no NaN/∞/≤0 quantity; duplicate submissions blocked; ambiguous → no blind retry |
+| `test_fill_position_safety.py` | position from actual fills; partial fills; duplicate fills never double-count; weighted avg entry |
+| `test_session_reconcile_safety.py` | entry cutoff; flatten must verify position==0; failed flatten → `HALTED`; mismatch/unknown blocks entries |
+| `test_ai_safety.py` | AI cannot reach broker/order tools; unknown/unauthorized tools rejected; flatten disabled |
+| `test_engine_pipeline.py` | mock market data → engine → fill → flat (async end-to-end) |
+| `test_api.py` | health + secret-free config handling + dashboard served |
+| `test_config_observability.py` | no secrets in `config.yaml`; dashboard panels; startup events |
+
+### Offline deterministic demo
+
+```powershell
+.\.venv\Scripts\python.exe scripts\demo_mock.py
+```
+
+Replays the scripted mock series against the mock broker, prints a JSON summary
+(`signals`, `orders`, `trades`, `realized_pnl`, `regime`, `health`, candle
+counts) and then performs a verified flatten. Exit code is 0 only if the
+position ends flat and health is not `error`.
+
+### Backtest (synthetic, offline)
+
+```powershell
+.\.venv\Scripts\python.exe -m app.backtesting.run --length 600 --pretty
+```
+
+Runs the *same* features/regime/strategy/risk/sizing code as live trading, but
+against generated candles. Flags: `--length` (candles), `--seed`, `--symbol`,
+`--pretty`, and `--csv <file>` to replay your own candles
+(`timestamp,open,high,low,close,volume`; the timeframe comes from
+`timeframes.signal`). **Do not tune the strategy on the synthetic P&L** — it is
+an execution smoke test, not an optimization.
+
+### Headless paper runner
+
+This runner uses whatever `market_data.provider` / `trading.broker` are set to
+in `configs/config.yaml` (shipped default: `alpaca`, which needs credentials in
+`.env`). For an **offline** run, set both to `mock` in `configs/config.yaml`
+first:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.runner.paper --ticks 600     # mock replay + verified flatten
+.\.venv\Scripts\python.exe -m app.runner.paper --duration 60   # run for N wall-clock seconds
+```
+
+With the mock provider it replays the scripted series and then flattens and
+verifies flatness (exit code 1 if not flat). With a streaming provider it runs
+until interrupted (`Ctrl+C`), then flattens if a position is open.
+
+### API server + live dashboard
+
+```powershell
+.\.venv\Scripts\python.exe -m app
+# then open: http://127.0.0.1:8000/dashboard
+```
+
+- Host/port come from `dashboard.host` / `dashboard.port` in `configs/config.yaml`.
+- `trading.autostart: true` starts the engine with the web server. Set it to
+  `false` (or use the test factory `create_app(autostart=False)`) to serve the
+  API without starting the engine.
+- Equivalent entry points: `uvicorn app.main:app --reload` or the console script
+  `trading-agent` (installed from `pyproject.toml`).
+
+The dashboard (`dashboard/index.html`) shows, live via SSE: system state,
+market, features, regime, strategy, risk, position, P&L, orders, session, AI
+supervisor status, and a live event stream. It also exposes human controls
+(pause / resume / flatten / reconcile) that use the **same command layer as the
+AI**.
+
+### Poke the API
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health/live
+Invoke-RestMethod http://127.0.0.1:8000/api/system/status
+Invoke-RestMethod http://127.0.0.1:8000/api/regime
+Invoke-RestMethod http://127.0.0.1:8000/api/config          # sanitized, no secrets
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/control/pause
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/control/flatten
+```
+
+Interactive docs: `http://127.0.0.1:8000/docs` (FastAPI/OpenAPI).
+
+## Project structure
+
+```text
+tradebot/
+|-- app/                          # the application package (all code)
+|   |-- __main__.py               # `python -m app` -> API server + dashboard
+|   |-- main.py                   # FastAPI factory (create_app) + console entry
+|   |-- runtime.py                # build_runtime(): wires engine + AI; startup checklist
+|   |-- api/
+|   |   `-- routes.py             # REST + SSE endpoints + human controls
+|   |-- config/
+|   |   |-- models.py             # Pydantic schema of configs/config.yaml (source of truth)
+|   |   |-- loader.py             # load_config(), get_env(), sanitized_config()
+|   |   `-- settings.py           # EnvSettings: SECRETS from .env / environment
+|   |-- core/                     # clock, ids, errors, structured logging
+|   |-- domain/                   # pure domain models (market, features, regime,
+|   |                             #   signals, orders, positions, risk, pnl, session, enums)
+|   |-- market_data/
+|   |   |-- base.py               # MarketDataProvider interface (+ dispatcher)
+|   |   |-- mock.py               # deterministic synthetic provider
+|   |   |-- alpaca_provider.py    # Alpaca (paper) market-data adapter
+|   |   |-- aggregator.py         # trades -> OHLCV candles per timeframe
+|   |   `-- store.py              # latest snapshot + candle store, data age
+|   |-- features/
+|   |   |-- indicators.py         # EMA, RSI, ATR, VWAP, rolling high/low, ...
+|   |   `-- engine.py             # candles -> FeatureSnapshot
+|   |-- regime/engine.py          # FeatureSnapshot -> RegimeSnapshot (UNKNOWN if unsure)
+|   |-- strategies/
+|   |   |-- base.py               # Strategy + StrategyContext
+|   |   `-- breakout_momentum.py  # the only strategy (breakout + momentum)
+|   |-- signals/generator.py      # attaches stop/target from RISK config
+|   |-- risk/engine.py            # RiskEngine: the mandatory, fail-closed gate
+|   |-- portfolio/
+|   |   |-- position_sizing.py    # risk_amount / stop_distance, capped to max notional
+|   |   |-- position_manager.py   # authoritative position state from FILLS
+|   |   `-- pnl_engine.py         # realized/unrealized P&L, equity
+|   |-- orders/oms.py             # order state machine, idempotency, fill dedupe
+|   |-- execution/executor.py     # submit; ambiguous -> reconcile (never blind retry)
+|   |-- brokers/
+|   |   |-- base.py               # BrokerAdapter interface + reconcile()
+|   |   |-- mock.py               # in-memory simulated broker
+|   |   `-- alpaca.py             # Alpaca PAPER broker adapter
+|   |-- sessions/manager.py       # session clock, entry cutoff, flat-at-end invariant
+|   |-- events/                   # async event bus + EventType taxonomy
+|   |-- monitoring/               # health registry + SystemState (dashboard payload)
+|   |-- storage/                  # SQLAlchemy models + repository (SQLite/Postgres)
+|   |-- ai_supervisor/
+|   |   |-- provider.py           # Ollama provider (or UnavailableProvider)
+|   |   |-- gateway.py            # permission-checked tool gateway
+|   |   |-- tools.py              # read-only + controlled tools bound to the engine
+|   |   `-- supervisor.py         # event-driven investigations
+|   |-- backtesting/
+|   |   |-- data.py               # synthetic candle generation
+|   |   |-- engine.py             # runs the SAME pipeline on historical candles
+|   |   |-- metrics.py            # P&L / drawdown / Sharpe / profit factor
+|   |   `-- run.py                # CLI: python -m app.backtesting.run
+|   `-- runner/
+|       |-- engine.py             # TradingEngine: orchestrates the pipeline + safety gates
+|       |-- factories.py          # builds provider/broker/storage from config
+|       `-- paper.py              # headless paper runner
+|-- configs/config.yaml           # SINGLE SOURCE OF TRUTH for non-secret behaviour
+|-- dashboard/index.html          # live dashboard (SSE)
+|-- scripts/
+|   |-- demo_mock.py              # offline end-to-end demo
+|   `-- install_deps.bat          # creates/installs into .venv
+|-- tests/                        # pytest suite (support.py = shared fixtures)
+|-- data/                         # SQLite database (gitignored)
+|-- logs/                         # structured logs (gitignored)
+|-- pyproject.toml                # deps, console script, pytest config
+|-- requirements.txt              # pinned runtime deps for install_deps.bat
+`-- .env.example                  # secrets template (copy to .env)
+```
+
+## How the pieces connect
+
+`TradingEngine` (`app/runner/engine.py`) is the orchestrator that holds every
+component and enforces the safety gates. Data flows in one direction, and side
+effects (persistence, monitoring, AI, dashboard) hang off an async event bus so a
+failure in one never stops the pipeline.
+
+```text
+        provider (mock|alpaca)
+              |  Quote/Trade
+              v
+      on_market_update  --(validate: symbol/price/crossed/out-of-order/duplicate)
+              |
+              v
+        MarketStore (snapshot + data age)   CandleAggregator (per timeframe)
+              |                                      |  on candle close
+              |                                      v
+              |                        FeatureEngine -> FeatureSnapshot (ready?)
+              |                                      |
+              |                        RegimeEngine -> RegimeSnapshot (UNKNOWN?)
+              |                                      |
+              |                        StrategyContext -> Strategy.evaluate()
+              |                                      |
+              |                        SignalGenerator (stop/target from RISK cfg)
+              |                                      |
+              v                                      v
+        RiskEngine (mandatory gate) <----- StrategySignal
+              |  approved
+              v
+        PositionSizer (risk budget / stop, capped to max notional)
+              |
+              v
+        OMS (validate qty, idempotency, dedupe) -> OrderExecutor -> Broker
+              |  fill(s)
+              v
+        PositionManager (AUTHORITATIVE)  ->  PnlEngine  ->  Trade records
+              |
+              v
+        SessionManager (cutoff / closeout / flat-at-end)   ->  repository (SQLite)
+```
+
+Cross-cutting connections:
+
+- **Event bus** (`app/events`): every transition emits a typed `EventType`
+  (`SYSTEM_READY`, `SIGNAL_GENERATED`, `RISK_APPROVED/REJECTED`, `ORDER_*`,
+  `POSITION_UPDATED`, `TRADE_CLOSED`, `FLATTEN_*`, `RECONCILIATION_*`, `AI_*`,
+  ...). The dashboard SSE stream, the AI supervisor, and storage subscribe here.
+- **SystemState** (`app/monitoring/state.py`): the sanitized snapshot serialized
+  by `engine.payload()`; this is exactly what the REST API and dashboard render.
+- **Storage** (`app/storage`): auxiliary and best-effort — persistence failures
+  never block trading. Enable/disable with `storage.enabled`.
+- **AI supervisor** (`app/ai_supervisor`): subscribes to *meaningful* events
+  (order rejected, risk rejected, reconciliation failure, system error, flatten
+  failure) and can only call the permission-checked tool gateway. It cannot trade.
+- **Human controls** (`app/api/routes.py`): pause/resume/flatten/reconcile go
+  through the *same* engine command layer the AI uses.
+- **Backtesting** reuses the identical `FeatureEngine`/`RegimeEngine`/`Strategy`/
+  `RiskEngine`/`PositionSizer` classes — only the data source and execution differ,
+  so the offline run exercises the same code paths as paper trading.
+
+### Safety invariants (Phase A)
+
+- **Regime safety** — if the regime is `UNKNOWN` (insufficient candles / missing
+  indicators), the strategy WAITs and never claims `bullish_regime`,
+  `bearish_regime`, or `trend_confirmed`.
+- **Feature safety** — missing/stale/insufficient features surface as `None` and
+  block evaluation via `FeatureSnapshot.ready`; VWAP-missing is never "above".
+- **Market-data safety** — wrong symbol, invalid/crossed prices, duplicate or
+  out-of-order ticks are dropped; the engine never invents a replacement price.
+  Quotes and trades are tracked as separate streams (a paired quote+trade at the
+  same timestamp is valid).
+- **Risk authority** — every entry funnels through `RiskEngine`; the strategy,
+  signal generator, and AI cannot bypass it. The maximum position value is
+  enforced *after sizing* (`quantity * price <= cap`), where quantity is known.
+- **Position-sizing safety** — malformed inputs (zero/missing stop, non-positive
+  or NaN equity, non-finite cap/price) are rejected; no NaN/∞/≤0 quantity reaches
+  the OMS.
+- **Order idempotency** — duplicate submissions (same order id or client order id)
+  are blocked; an ambiguous submission flags reconciliation instead of blind retry.
+- **Fill/position safety** — position state derives from actual fills; partial
+  fills accumulate; duplicate fill events never double-count; average entry is a
+  weighted mean.
+- **Session closeout** — the entry cutoff stops new entries; closeout flattens and
+  then **verifies** `position == 0`. A merely *submitted* exit order does not
+  count; a failed flatten emits a critical `FLATTEN_FAILED` and sets the session
+  to `HALTED`.
+- **Reconciliation** — startup/recovery compares broker vs internal state; unknown
+  or mismatched broker state blocks new entries (it never assumes flat).
+- **AI safety** — the AI has no broker/order tools, cannot call unknown or
+  unauthorized tools, and `request_flatten` stays disabled unless explicitly
+  permitted (it is not, in this phase).
+
+## Configuration — one source of truth
+
+Two layers, deliberately separated:
+
+1. **Behaviour → `configs/config.yaml`** (single source of truth, no secrets).
+2. **Secrets → `.env` / environment** (`EnvSettings`, read from `.env`).
+
+Key non-secret knobs in `configs/config.yaml`:
+
+| Section | Highlights |
+| --- | --- |
+| `trading` | `symbol`, `market`, `broker` (`alpaca\|mock`), `autostart` |
+| `timeframes` | `context: 15m`, `signal: 5m`, `execution: 1m` |
+| `features` | EMA periods, RSI/ATR periods, VWAP, range lookback |
+| `regime` | `ema_distance_atr_min`, volatility thresholds, `min_candles` |
+| `strategy` | breakout buffer, RSI bands, EMA pairs, spread limit, cooldown |
+| `risk` | `risk_per_trade_percent`, `maximum_daily_loss_percent`, `maximum_open_positions`, `maximum_position_value_percent`, `maximum_orders_per_session`, stop ATR multiplier, RR ratio |
+| `position_sizing` | method, risk %, min/max quantity, precision |
+| `session` / `session_closeout` | session times, `entry_cutoff`, `flatten_deadline`, flatten retries |
+| `market_data` | provider, feed, reconnect, `max_age_seconds`, and the `mock` block (`tick_seconds`, `seed`) used by the offline demo |
+| `ai` | provider, model, endpoint, investigation triggers, **permissions** |
+| `logging`, `dashboard`, `monitoring`, `alerts`, `storage` | ops/observability knobs |
+
+Secrets (never in `config.yaml`): `ALPACA_API_KEY`, `ALPACA_API_SECRET`,
+`OLLAMA_API_KEY`, `DATABASE_URL`, `QUIVER_API_KEY`. `GET /api/config` returns a
+**sanitized** view (secrets masked); logs redact secrets.
+
+> To run fully offline (no Alpaca keys), set in `.env`:
+> `ALPACA_*` blank and, for the demo/backtest, override provider/broker to `mock`
+> (the demo script already does this programmatically).
+
+## API reference (abridged)
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /health`, `/health/ready`, `/health/live` | liveness/readiness + component checks |
+| `GET /api/system/status` | mode, symbol, broker/provider, components, uptime |
+| `GET /api/market/latest` | latest normalized snapshot |
+| `GET /api/features`, `/api/regime`, `/api/strategy/status` | feature/regime/strategy state |
+| `GET /api/risk/status`, `/api/orders`, `/api/positions`, `/api/pnl` | risk, orders, position, P&L |
+| `GET /api/session`, `/api/events`, `/api/logs`, `/api/ai/status` | session, events, log tail, AI status |
+| `GET /api/config` | sanitized configuration |
+| `GET /api/stream` | SSE live event stream (used by the dashboard) |
+| `POST /api/control/{pause,resume,flatten,reconcile}` | human controls (same layer as AI) |
+| `GET /dashboard` | the live dashboard page |
+
+## Persistence & logs
+
+- SQLite (SQLAlchemy) at `data/trading_agent.sqlite3` by default (or set
+  `DATABASE_URL` / `storage.url`). Set `storage.enabled: false` to run without it.
+- Structured JSON logs at `logs/trading-agent.log` (path in `logging.file.path`).
+  `GET /api/logs` returns the tail.
+
+## Troubleshooting
+
+- **No candles / regime UNKNOWN** — the regime needs ~50 candles per timeframe.
+  The demo/backtest warm up automatically (mock `tick_seconds`). On real data this
+  is a natural warm-up period; entries simply wait.
+- **`/health` shows an error** — read `error` in the JSON and `logs/trading-agent.log`.
+  Most common causes: missing `ALPACA_*` credentials or a live-endpoint URL (rejected).
+- **`paper_trading_only` / startup refused** — set `trading.mode: paper`; the
+  config model rejects anything else.
+- **Tests fail after editing config** — run `pytest` again; the suite asserts
+  `config.yaml` contains no secret-like tokens.
+
+## Limitations / not in scope (this phase)
+
+- **Paper trading only** — no live execution path exists by design.
+- Alpaca **live** market data is intentionally not exercised here; the mock
+  provider is the default for offline runs.
+- The AI supervisor is optional and cannot flatten or trade; it is a read-only
+  investigation layer unless permissions are explicitly widened (they are not).
+- The backtest/demo P&L is synthetic and is **not** evidence of profitability.
+
+---
+
+*Keep this README as the mirror of the source of truth: when you change
+`configs/config.yaml`, the engine's behaviour changes accordingly — update the
+tables above to match.*
+
+
+
