@@ -19,6 +19,11 @@ async def test_mock_run_opens_and_flattens():
     config.trading.broker = "mock"
     config.ai.enabled = False
     config.storage.enabled = False
+    # This test exercises the FULL pipeline including order creation against the
+    # in-memory mock broker, so it explicitly opens the Phase B execution gate.
+    # (Phase B safety — "execution disabled blocks orders" — is covered by
+    # tests/test_phase_b_execution_gate.py.)
+    config.execution.enabled = True
     configure_logging(config, env, project_root=PROJECT_ROOT)
 
     runtime = build_runtime(config, env)

@@ -84,7 +84,13 @@ class TradingEngine:
         timeframes = [config.timeframes.context, config.timeframes.signal, config.timeframes.execution]
         self.timeframes = list(dict.fromkeys(timeframes))
         self.store = MarketStore(self.timeframes)
-        self.aggregator = CandleAggregator(self.symbol, self.timeframes)
+        # Phase B #5: candles whose bucket just opened (drained per tick).
+        self._candle_started: list = []
+        self.aggregator = CandleAggregator(
+            self.symbol,
+            self.timeframes,
+            on_candle_started=self._candle_started.append,
+        )
 
         self.feature_engine = FeatureEngine(config.features)
         self.regime_engine = RegimeEngine(
@@ -135,10 +141,52 @@ class TradingEngine:
         self._last_update_at: dict[str, datetime] = {}
 
     # -- component wiring ---------------------------------------------------
+    @property
+    def execution_enabled(self) -> bool:
+        """Fail-closed master gate for order creation and submission.
+
+        PHASE B: when False, market data / features / regime / strategy /
+        signals / risk all keep running, but nothing may reach a broker. A
+        missing configuration attribute defaults to disabled.
+        """
+        return bool(getattr(self.config.execution, "enabled", False))
+
+    def execution_status(self) -> dict:
+        enabled = self.execution_enabled
+        return {
+            "enabled": enabled,
+            "status": "ENABLED" if enabled else "DISABLED",
+            "gate": "execution.enabled",
+            "reason": None if enabled else "execution.enabled=false",
+            "market_data": "ENABLED",
+            "features": "ENABLED",
+            "regime": "ENABLED",
+            "strategy": "ENABLED",
+            "signal_generation": "ENABLED",
+            "risk_evaluation": "ENABLED",
+            "order_creation": "ENABLED" if enabled else "DISABLED",
+            "broker_contact": "ENABLED" if enabled else "DISABLED",
+        }
+
     async def _wire(self) -> None:
         self.provider.set_handler(self.on_market_update)
         await self.provider.connect([self.symbol])
-        await self.broker.connect()
+        if self.execution_enabled:
+            await self.broker.connect()
+        else:
+            # EXECUTION SAFETY (Phase B): with execution disabled we never touch a
+            # broker endpoint at all — not even a read — so "no order can be
+            # submitted" is provable rather than merely intended.
+            logger.warning(
+                "EXECUTION DISABLED — broker not connected",
+                extra={
+                    "structured": {
+                        "event": "EXECUTION_DISABLED",
+                        "component": "engine",
+                        "reason": "execution.enabled=false",
+                    }
+                },
+            )
         await self._refresh_account()
 
     # -- lifecycle ----------------------------------------------------------
@@ -156,6 +204,22 @@ class TradingEngine:
             "PAPER MODE VERIFIED",
             extra={"structured": {"event": "PAPER_MODE_VERIFIED", "component": "engine", "mode": self.config.trading.mode}},
         )
+        if not self.execution_enabled:
+            # PHASE B: the whole pipeline runs, only order submission is gated.
+            logger.warning(
+                "EXECUTION DISABLED",
+                extra={
+                    "structured": {
+                        "event": "EXECUTION_DISABLED",
+                        "component": "engine",
+                        "reason": "execution.enabled=false",
+                        "orders": "disabled",
+                    }
+                },
+            )
+            await self.bus.emit(
+                EventType.EXECUTION_DISABLED, payload={"reason": "execution.enabled=false", "orders": "disabled"}
+            )
 
         self._register_health()
 
@@ -203,7 +267,13 @@ class TradingEngine:
             critical=True,
         )
         self.health.register(
-            "broker", lambda: self.broker.health().connected, detail="paper broker", critical=True
+            "broker",
+            # EXECUTION SAFETY: with execution disabled the broker is never
+            # connected, so it must not count as a critical failure — the whole
+            # point is that trading data flow continues without execution.
+            lambda: True if not self.execution_enabled else self.broker.health().connected,
+            detail="paper broker" if self.execution_enabled else "not connected (execution disabled)",
+            critical=True,
         )
         self.health.register(
             "database",
@@ -234,6 +304,14 @@ class TradingEngine:
             await asyncio.sleep(1.0)
 
     async def _refresh_account(self) -> None:
+        if not self.execution_enabled:
+            # EXECUTION SAFETY: never query the broker while execution is off.
+            # Use the configured baseline so risk/sizing diagnostics stay
+            # meaningful without touching a broker endpoint.
+            equity = float(self.config.backtesting.initial_capital)
+            self._account_equity = equity
+            self.pnl.set_equity(equity)
+            return
         try:
             account = await self.broker.get_account()
             self._account_equity = account.equity
@@ -298,11 +376,23 @@ class TradingEngine:
                         }
                     },
                 )
+                await self.bus.emit(
+                    EventType.CANDLE_REJECTED,
+                    payload={"symbol": symbol, "reason": "invalid_trade"},
+                )
                 return
             if self._is_out_of_order(symbol, update.timestamp, "trade"):
+                await self.bus.emit(
+                    EventType.CANDLE_REJECTED,
+                    payload={"symbol": symbol, "reason": "out_of_order_or_duplicate"},
+                )
                 return
             self.store.update_trade(update)
-            for candle in self.aggregator.add_trade(update):
+            closed = self.aggregator.add_trade(update)
+            for started in self._candle_started:
+                await self._emit_candle_started(started)
+            self._candle_started.clear()
+            for candle in closed:
                 self.store.add_candle(candle)
                 await self._on_candle_closed(candle)
         else:  # pragma: no cover - defensive
@@ -323,6 +413,18 @@ class TradingEngine:
                 except Exception:  # noqa: BLE001 - price seam is best-effort
                     pass
             await self._manage_position(snapshot.price)
+        logger.debug(
+            "raw market data received",
+            extra={
+                "structured": {
+                    "event": "MARKET_DATA_TICK",
+                    "component": "market_data",
+                    "symbol": symbol,
+                    "kind": type(update).__name__,
+                    "price": snapshot.price if snapshot else None,
+                }
+            },
+        )
         await self.bus.emit(
             EventType.MARKET_DATA_RECEIVED,
             payload={
@@ -366,8 +468,48 @@ class TradingEngine:
         snapshot = self.store.snapshot(self.symbol)
         return self.feature_engine.compute(candles, timeframe=timeframe, snapshot=snapshot, now=now)
 
+    async def _emit_candle_started(self, candle) -> None:
+        """Phase B #5: a new candle bucket opened (symbol + timeframe)."""
+        logger.info(
+            "CANDLE STARTED",
+            extra={
+                "structured": {
+                    "event": "CANDLE_STARTED",
+                    "component": "market_data",
+                    "symbol": candle.symbol,
+                    "timeframe": candle.timeframe,
+                    "bucket": candle.timestamp.isoformat(),
+                }
+            },
+        )
+        await self.bus.emit(
+            EventType.CANDLE_STARTED,
+            payload={"symbol": candle.symbol, "timeframe": candle.timeframe},
+        )
+
     async def _on_candle_closed(self, candle) -> None:
         now = utcnow()
+        logger.info(
+            "CANDLE COMPLETED",
+            extra={
+                "structured": {
+                    "event": "CANDLE_COMPLETED",
+                    "component": "market_data",
+                    "symbol": candle.symbol,
+                    "timeframe": candle.timeframe,
+                    "close": candle.close,
+                    "volume": candle.volume,
+                }
+            },
+        )
+        await self.bus.emit(
+            EventType.CANDLE_COMPLETED,
+            payload={
+                "symbol": candle.symbol,
+                "timeframe": candle.timeframe,
+                "close": candle.close,
+            },
+        )
         logger.debug(
             "candle closed",
             extra={"structured": {"event": "CANDLE_CLOSED", "component": "engine", "timeframe": candle.timeframe}},
@@ -418,7 +560,7 @@ class TradingEngine:
         features = self._features_for(self.config.timeframes.signal, now)
         self.state.features = features
         self.state.last_evaluation_at = now
-        logger.debug(
+        logger.info(
             "FEATURES UPDATED",
             extra={
                 "structured": {
@@ -443,7 +585,7 @@ class TradingEngine:
 
         # REGIME SAFETY: report explicitly why evaluation cannot proceed.
         if regime.is_unknown:
-            logger.debug(
+            logger.info(
                 "STRATEGY WAIT — regime unknown",
                 extra={
                     "structured": {
@@ -456,7 +598,7 @@ class TradingEngine:
             )
             return None
         if not features.ready:
-            logger.debug(
+            logger.info(
                 "STRATEGY WAIT — features not ready",
                 extra={
                     "structured": {
@@ -501,7 +643,7 @@ class TradingEngine:
             return None
 
         if signal is None:
-            logger.debug(
+            logger.info(
                 "NO_SIGNAL",
                 extra={"structured": {"event": "STRATEGY_EVALUATED", "component": "strategy", "result": "no_signal"}},
             )
@@ -561,6 +703,19 @@ class TradingEngine:
         now = utcnow()
         decision: RiskDecision = self.risk_engine.evaluate(signal, self._build_risk_context(now))
         self._last_decision = decision
+        logger.info(
+            "RISK EVALUATED",
+            extra={
+                "structured": {
+                    "event": "RISK_EVALUATED",
+                    "component": "risk",
+                    "signal_id": signal.signal_id,
+                    "approved": decision.approved,
+                    "reason": decision.reason.value,
+                    "execution_enabled": self.execution_enabled,
+                }
+            },
+        )
         if self.repository is not None:
             await self.repository.save_risk_decision(decision)
 
@@ -668,6 +823,36 @@ class TradingEngine:
             await self._record_execution_failure(signal, sizing.rejected_reason or "sizing_failed")
             return
 
+        if not self.execution_enabled:
+            # EXECUTION SAFETY (Phase B, fail-closed): risk approved and sizing
+            # computed for diagnostics, but execution is disabled — so we stop
+            # HERE. No OrderIntent is created, nothing enters the OMS, and no
+            # broker endpoint is called.
+            logger.warning(
+                "EXECUTION BLOCKED",
+                extra={
+                    "structured": {
+                        "event": "EXECUTION_BLOCKED",
+                        "component": "engine",
+                        "reason": "execution_disabled",
+                        "signal_id": signal.signal_id,
+                        "direction": signal.direction.value,
+                        "quantity": sizing.final_quantity,
+                    }
+                },
+            )
+            await self.bus.emit(
+                EventType.EXECUTION_BLOCKED,
+                payload={
+                    "signal_id": signal.signal_id,
+                    "reason": "execution_disabled",
+                    "quantity": sizing.final_quantity,
+                },
+                correlation_id=signal.correlation_id,
+                session_id=signal.session_id,
+            )
+            return
+
         side = Side.BUY if signal.direction is Direction.LONG else Side.SELL
         intent = OrderIntent(
             order_id=new_order_id(),
@@ -725,6 +910,27 @@ class TradingEngine:
         is_exit: bool = False,
         exit_reason: str | None = None,
     ) -> bool:
+        # EXECUTION SAFETY (Phase B): the single funnel to the broker. Even if a
+        # future code path produced an Order directly, submission is refused here.
+        if not self.execution_enabled:
+            logger.critical(
+                "EXECUTION BLOCKED — order submission refused",
+                extra={
+                    "structured": {
+                        "event": "EXECUTION_BLOCKED",
+                        "component": "engine",
+                        "reason": "execution_disabled",
+                        "order_id": order.order_id,
+                        "side": order.side.value,
+                        "quantity": order.quantity,
+                    }
+                },
+            )
+            await self.bus.emit(
+                EventType.EXECUTION_BLOCKED,
+                payload={"order_id": order.order_id, "reason": "execution_disabled"},
+            )
+            return False
         try:
             result: ExecutionResult = await self.executor.submit(order)
         except OrderRejected as exc:
@@ -977,6 +1183,34 @@ class TradingEngine:
             extra={"structured": {"event": "RECONCILIATION_STARTED", "component": "engine"}},
         )
         await self.bus.emit(EventType.RECONCILIATION_STARTED, payload={"symbol": self.symbol})
+        if not self.execution_enabled:
+            # EXECUTION SAFETY: while execution is disabled no order can exist,
+            # so internal state is trivially flat and there is nothing to compare
+            # against a broker. Crucially we do NOT contact the broker here, and
+            # we do NOT assume anything about real positions — we simply record
+            # that reconciliation is not applicable in this mode.
+            self._need_reconciliation = False
+            self.state.reconciliation = {
+                "ok": True,
+                "discrepancies": [],
+                "last_run_at": utcnow().isoformat(),
+                "mode": "execution_disabled",
+                "note": "no orders possible while execution is disabled",
+            }
+            logger.info(
+                "RECONCILIATION SKIPPED (execution disabled)",
+                extra={
+                    "structured": {
+                        "event": "RECONCILIATION_COMPLETED",
+                        "component": "engine",
+                        "mode": "execution_disabled",
+                    }
+                },
+            )
+            await self.bus.emit(
+                EventType.RECONCILIATION_COMPLETED, payload={"mode": "execution_disabled"}
+            )
+            return True
         try:
             await self.broker.get_account()
             discrepancies = await self.broker.reconcile([self.position_manager.position])
@@ -1200,6 +1434,7 @@ class TradingEngine:
         data = self.state.to_payload()
         data["health"] = self.health.report()
         data["paper_trading_only"] = True
+        data["execution"] = self.execution_status()
         return data
 
     @property

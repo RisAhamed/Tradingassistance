@@ -121,10 +121,15 @@ class Runtime:
     async def _connectivity_checks(self) -> list[Check]:
         provider_health = self.engine.provider.health()
         broker_health = self.engine.broker.health()
-        checks = [
-            Check("market_data", provider_health.connected, provider_health.detail),
-            Check("broker", broker_health.connected, broker_health.detail),
-        ]
+        checks = [Check("market_data", provider_health.connected, provider_health.detail)]
+        if self.engine.execution_enabled:
+            checks.append(Check("broker", broker_health.connected, broker_health.detail))
+        else:
+            # EXECUTION SAFETY: with orders disabled the broker is deliberately
+            # never connected, so it must not fail the startup checklist.
+            checks.append(
+                Check("broker", True, "not applicable (execution disabled)", mandatory=False)
+            )
         if self.database is not None and self.config.storage.enabled:
             checks.append(Check("database", await self.database.ping(), "SELECT 1"))
         else:
@@ -175,7 +180,7 @@ def build_ai_provider(config: AppConfig, env: EnvSettings) -> AIProvider:
 def build_runtime(config: AppConfig, env: EnvSettings) -> Runtime:
     """Construct the fully wired runtime (no I/O yet)."""
     bus = EventBus()
-    provider = create_provider(config, env)
+    provider = create_provider(config, env, bus=bus)
     broker = create_broker(config, env)
     database, repository = create_storage(config, env)
     engine = TradingEngine(

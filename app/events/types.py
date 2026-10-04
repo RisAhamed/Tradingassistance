@@ -12,6 +12,21 @@ from app.core.ids import new_event_id
 
 
 class EventType(str, Enum):
+    CANDLE_STARTED = "CandleStarted"
+    CANDLE_COMPLETED = "CandleCompleted"
+    CANDLE_REJECTED = "CandleRejected"
+    STRATEGY_EVALUATED = "StrategyEvaluated"
+    RISK_EVALUATED = "RiskEvaluated"
+    EXECUTION_DISABLED = "ExecutionDisabled"
+    EXECUTION_BLOCKED = "ExecutionBlocked"
+    ALPACA_CONNECTING = "AlpacaConnecting"
+    ALPACA_CONNECTED = "AlpacaConnected"
+    ALPACA_DISCONNECTED = "AlpacaDisconnected"
+    ALPACA_SUBSCRIPTION_STARTED = "AlpacaSubscriptionStarted"
+    ALPACA_SUBSCRIPTION_FAILED = "AlpacaSubscriptionFailed"
+    ALPACA_RECONNECTING = "AlpacaReconnecting"
+    ALPACA_RECONNECTED = "AlpacaReconnected"
+    ALPACA_RECONNECT_FAILED = "AlpacaReconnectFailed"
     MARKET_DATA_RECEIVED = "MarketDataReceived"
     CANDLE_CLOSED = "CandleClosed"
     FEATURES_UPDATED = "FeaturesUpdated"

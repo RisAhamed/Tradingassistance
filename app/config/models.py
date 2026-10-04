@@ -249,6 +249,15 @@ class RetryConfig(_Section):
 
 
 class ExecutionConfig(_Section):
+    """Execution gate — PHASE B: this is the master kill-switch for orders.
+
+    ``enabled=False`` is the DEFAULT (fail-closed): market data, features,
+    regime, strategy, signal generation and risk evaluation all continue, but
+    no order may be created or submitted to any broker. A missing/ambiguous
+    configuration therefore keeps execution disabled.
+    """
+
+    enabled: bool = False
     order_type: Literal["market", "limit"] = "market"
     allow_short: bool = True
     slippage: SlippageConfig = Field(default_factory=SlippageConfig)

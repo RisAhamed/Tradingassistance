@@ -139,6 +139,10 @@ position_sizing:
   quantity_precision: 6
 
 execution:
+  # PHASE B MASTER GATE. When false: market data, features, regime, strategy,
+  # signals and risk evaluation all run, but NO order is ever created or sent to
+  # any broker. Fail-closed — leave false until real data is proven.
+  enabled: false
   order_type: market         # market | limit
   allow_short: true
   slippage:

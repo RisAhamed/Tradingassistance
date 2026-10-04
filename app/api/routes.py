@@ -144,6 +144,40 @@ def create_router() -> APIRouter:
             **runtime.engine.payload().get("ai", {}),
         }
 
+    @router.get("/api/execution")
+    async def execution_status(request: Request):
+        runtime = _runtime(request)
+        payload = runtime.engine.payload()
+        return {"execution": payload.get("execution"), "paper_trading_only": True}
+
+    @router.get("/api/market/status")
+    async def market_status(request: Request):
+        runtime = _runtime(request)
+        engine = runtime.engine
+        snapshot = engine.state.latest_snapshot
+        provider_health = engine.provider.health()
+        age = snapshot.age_seconds(_now()) if snapshot else None
+        limit = runtime.config.market_data.max_age_seconds
+        candles: dict[str, object] = {}
+        for timeframe in engine.timeframes:
+            current = engine.aggregator.current(timeframe)
+            candles[timeframe] = current.model_dump(mode="json") if current else None
+        return {
+            "provider": engine.provider.name,
+            "connected": provider_health.connected,
+            "detail": provider_health.detail,
+            "symbol": engine.symbol,
+            "bid": snapshot.bid if snapshot else None,
+            "ask": snapshot.ask if snapshot else None,
+            "last": snapshot.last if snapshot else None,
+            "price": snapshot.price if snapshot else None,
+            "spread_percent": snapshot.spread_percent if snapshot else None,
+            "data_age_seconds": age,
+            "max_age_seconds": limit,
+            "data_status": "STALE" if age is None or age > limit else "LIVE",
+            "candles": candles,
+        }
+
     @router.get("/api/config")
     async def config_endpoint(request: Request):
         runtime = _runtime(request)

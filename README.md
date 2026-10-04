@@ -28,12 +28,15 @@ RISK -> POSITION SIZE -> OMS -> BROKER -> FILL -> POSITION -> P&L
 | Area | State |
 | --- | --- |
 | Phase A baseline hardening | **Complete** (regime/feature/market-data/risk/sizing/order/fill/session/reconcile/AI safety + config source-of-truth) |
-| Automated tests | **66 passing** (`pytest tests`) |
+| **Phase B: real Alpaca market data** | **Complete — execution disabled by default** |
+| Execution gate | `execution.enabled: false` — fail-closed master kill-switch for orders |
+| Alpaca market-data websocket (read-only) | **Verified live** against `wss://stream.data.alpaca.markets` |
+| Automated tests | **91 passing** (`pytest tests`) |
 | `scripts/demo_mock.py` (offline, deterministic) | **Passing** — signals → orders → trade → verified flat |
 | `python -m app.backtesting.run --length 600` (synthetic) | **Passing** — 35 signals, 26 entries |
-| FastAPI + SSE + dashboard | **Working** |
-| Alpaca **paper** broker + Alpaca market-data adapters | Wired (require credentials) |
-| Live Alpaca market data | **Disabled in this phase** (mock provider is the default for offline runs) |
+| FastAPI + SSE + dashboard | **Working**, with a prominent `EXECUTION: DISABLED` banner |
+| Order submission | **Blocked** while `execution.enabled: false` |
+| Alpaca *trading* client | **Never constructed** while execution is disabled |
 | Live execution | **Not implemented / not permitted** |
 | AI flatten permission | **Disabled by configuration** (`ai.permissions.allow_flatten: false`) |
 
@@ -74,7 +77,7 @@ All commands are run from the repository root. On Windows use
 
 - Config lives in `pyproject.toml` (`asyncio_mode = "auto"`, `testpaths = ["tests"]`).
 - No network/credentials needed — tests use the mock provider/broker and an
-  offline AI provider. Expect **66 passed**.
+  offline AI provider. Expect **91 passed**.
 
 Coverage by file (the safety contract is executable here):
 
@@ -90,6 +93,8 @@ Coverage by file (the safety contract is executable here):
 | `test_engine_pipeline.py` | mock market data → engine → fill → flat (async end-to-end) |
 | `test_api.py` | health + secret-free config handling + dashboard served |
 | `test_config_observability.py` | no secrets in `config.yaml`; dashboard panels; startup events |
+| `test_phase_b_execution_gate.py` | **execution disabled blocks order creation + submission, never connects the broker, visible on dashboard/API; full pipeline still runs** |
+| `test_phase_b_market_data.py` | Alpaca normalization, malformed-message rejection, duplicate/out-of-order ticks, candle boundaries/gaps, feature warm-up, reconnect/reconnect-failure, secret-free logs |
 
 ### Offline deterministic demo
 
@@ -228,7 +233,8 @@ tradebot/
 |-- dashboard/index.html          # live dashboard (SSE)
 |-- scripts/
 |   |-- demo_mock.py              # offline end-to-end demo
-|   `-- install_deps.bat          # creates/installs into .venv
+|   |-- acceptance_alpaca.py      # PHASE B real-data acceptance (execution disabled)
+|   `-- install_deps.bat          # installs deps into .venv
 |-- tests/                        # pytest suite (support.py = shared fixtures)
 |-- data/                         # SQLite database (gitignored)
 |-- logs/                         # structured logs (gitignored)
@@ -297,7 +303,14 @@ Cross-cutting connections:
   `RiskEngine`/`PositionSizer` classes — only the data source and execution differ,
   so the offline run exercises the same code paths as paper trading.
 
-### Safety invariants (Phase A)
+### Safety invariants (Phase A + Phase B)
+
+- **Execution gate (Phase B, fail-closed)** — `execution.enabled` defaults to
+  `false`. When disabled: market data, features, regime, strategy, signal
+  generation, risk evaluation and sizing all still run, but **no order may be
+  created or submitted** — the engine stops after sizing and emits
+  `EXECUTION_BLOCKED`. The broker is never even connected, so no broker order
+  endpoint can be reached, and reconciliation is a documented no-op.
 
 - **Regime safety** — if the regime is `UNKNOWN` (insufficient candles / missing
   indicators), the strategy WAITs and never claims `bullish_regime`,
@@ -329,6 +342,51 @@ Cross-cutting connections:
   unauthorized tools, and `request_flatten` stays disabled unless explicitly
   permitted (it is not, in this phase).
 
+## Phase B — real Alpaca market data with execution disabled
+
+Phase B streams **real** Alpaca paper-account market data through the whole
+pipeline while keeping order submission switched off.
+
+```powershell
+# 1) credentials (paper) in .env — ALPACA_API_KEY / ALPACA_API_SECRET
+# 2) keep execution OFF (this is the shipped default in configs/config.yaml)
+#    execution:
+#      enabled: false
+# 3) run the acceptance script (read-only, broker forced to mock)
+.\.venv\Scripts\python.exe scripts\acceptance_alpaca.py --seconds 420
+```
+
+The script is read-only **by construction**: it asserts
+`execution.enabled == False`, forces the broker adapter to the in-memory mock
+(so no Alpaca *trading* client is ever built), and only opens the market-data
+websocket. It prints a pass/fail checklist.
+
+### Manual acceptance procedure (first real-data run)
+
+1. `configs/config.yaml` → `market_data.provider: alpaca`, `execution.enabled: false`.
+2. `.env` → paper credentials; confirm `ALPACA_PAPER=true`.
+3. `.\.venv\Scripts\python.exe scripts\acceptance_alpaca.py --seconds 600`
+4. Verify each acceptance item:
+
+   | # | Criterion | Where to look |
+   | --- | --- | --- |
+   | 1 | Alpaca connects | `AlpacaConnected` log/event |
+   | 2 | BTC/USD data arrives | `AlpacaSubscriptionStarted symbols=BTC/USD` |
+   | 3 | Data normalized | dashboard *Market Data* panel: bid/ask/last/spread populated |
+   | 4 | Candles form | `CANDLE_COMPLETED` logs; 1m/5m/15m candle counts |
+   | 5 | Features warm up | `FEATURES_UPDATED` with `ready`/`missing` |
+   | 6 | Regime leaves UNKNOWN | `REGIME_CHANGED` once ≥ `regime.min_candles` context candles close |
+   | 7 | Strategy evaluates | `STRATEGY_EVALUATED` / `SIGNAL_GENERATED` |
+   | 8 | Risk evaluates | `RISK_EVALUATED` with `approved` + reason |
+   | 9 | **No order submitted** | `Orders` panel empty; `EXECUTION_BLOCKED` logged; `GET /api/execution` → disabled |
+   | 10 | Dashboard reflects live state | `http://127.0.0.1:8000/dashboard` |
+
+5. Warm-up reality check: the regime needs `regime.min_candles` (default 20)
+   **completed** context candles. With `context: 15m` that is up to ~5 hours of
+   streaming before the first classification — during this period the regime is
+   legitimately `UNKNOWN` and the strategy waits. The acceptance script reports
+   `warmup.candles_remaining` so you know how far along you are.
+
 ## Configuration — one source of truth
 
 Two layers, deliberately separated:
@@ -347,6 +405,7 @@ Key non-secret knobs in `configs/config.yaml`:
 | `strategy` | breakout buffer, RSI bands, EMA pairs, spread limit, cooldown |
 | `risk` | `risk_per_trade_percent`, `maximum_daily_loss_percent`, `maximum_open_positions`, `maximum_position_value_percent`, `maximum_orders_per_session`, stop ATR multiplier, RR ratio |
 | `position_sizing` | method, risk %, min/max quantity, precision |
+| `execution` | **`enabled` (PHASE B master gate, default `false`)**, order type, shorting, retry, duplicate-order protection |
 | `session` / `session_closeout` | session times, `entry_cutoff`, `flatten_deadline`, flatten retries |
 | `market_data` | provider, feed, reconnect, `max_age_seconds`, and the `mock` block (`tick_seconds`, `seed`) used by the offline demo |
 | `ai` | provider, model, endpoint, investigation triggers, **permissions** |
@@ -371,6 +430,8 @@ Secrets (never in `config.yaml`): `ALPACA_API_KEY`, `ALPACA_API_SECRET`,
 | `GET /api/risk/status`, `/api/orders`, `/api/positions`, `/api/pnl` | risk, orders, position, P&L |
 | `GET /api/session`, `/api/events`, `/api/logs`, `/api/ai/status` | session, events, log tail, AI status |
 | `GET /api/config` | sanitized configuration |
+| `GET /api/execution` | **execution gate status** (`ENABLED`/`DISABLED`, reason) |
+| `GET /api/market/status` | live feed state: provider, connected, symbol, bid/ask/last, spread, data age/status, current 1m/5m/15m candles |
 | `GET /api/stream` | SSE live event stream (used by the dashboard) |
 | `POST /api/control/{pause,resume,flatten,reconcile}` | human controls (same layer as AI) |
 | `GET /dashboard` | the live dashboard page |
@@ -397,8 +458,19 @@ Secrets (never in `config.yaml`): `ALPACA_API_KEY`, `ALPACA_API_SECRET`,
 ## Limitations / not in scope (this phase)
 
 - **Paper trading only** — no live execution path exists by design.
-- Alpaca **live** market data is intentionally not exercised here; the mock
-  provider is the default for offline runs.
+- **Candles are built from trades, not quotes.** On Alpaca's crypto feed
+  `BTC/USD` quotes arrive continuously but **trades are very sparse** (measured:
+  ~1 trade per 18 s). A short observation window may therefore complete **no**
+  candle, so features/regime do not advance yet. This is expected, not a fault:
+  normalization was verified (0 malformed rejections). Consequences:
+  - `regime.min_candles` (20) completed `15m` context candles ≈ **5 hours** of
+    streaming before the first regime classification;
+  - full feature readiness needs `ema_50`, i.e. ~50 signal candles.
+  Phase C options: subscribe to **1-minute bars** instead of raw trades, and/or
+  backfill historical bars at startup to warm up without waiting.
+- `market_data.max_age_seconds: 5` is tight for a sparse feed and makes
+  `MARKET_DATA_STALE` flap between updates. It is fail-closed (entries stay
+  blocked) but may need tuning for real crypto data.
 - The AI supervisor is optional and cannot flatten or trade; it is a read-only
   investigation layer unless permissions are explicitly widened (they are not).
 - The backtest/demo P&L is synthetic and is **not** evidence of profitability.

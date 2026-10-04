@@ -26,6 +26,11 @@ def _engine():
     config.storage.enabled = False
     config.logging.console.enabled = False
     config.logging.file.enabled = False
+    # These tests exercise broker-interaction paths (flatten via a real exit
+    # order, broker reconciliation), which only exist when the Phase B
+    # execution gate is open. The gate itself is tested in
+    # tests/test_phase_b_execution_gate.py.
+    config.execution.enabled = True
     return build_runtime(config, env).engine
 
 

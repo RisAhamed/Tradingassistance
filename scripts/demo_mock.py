@@ -24,6 +24,10 @@ async def main() -> int:
     config.trading.broker = "mock"
     config.ai.enabled = False
     config.logging.console.format = "structured"
+    # The mock broker is simulated in-process, so the demo explicitly opens the
+    # PHASE B execution gate to exercise the complete pipeline end-to-end.
+    # The shipped default (execution.enabled: false) blocks all order creation.
+    config.execution.enabled = True
     configure_logging(config, env, project_root=PROJECT_ROOT)
 
     runtime = build_runtime(config, env)

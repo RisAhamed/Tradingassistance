@@ -17,7 +17,7 @@ from app.storage.db import Database
 from app.storage.repository import Repository
 
 
-def create_provider(config: AppConfig, env: EnvSettings) -> MarketDataProvider:
+def create_provider(config: AppConfig, env: EnvSettings, bus=None) -> MarketDataProvider:
     provider = config.market_data.provider
     if provider == "mock":
         # 1 tick = a fixed span of market time (config-driven) so candle
@@ -34,11 +34,14 @@ def create_provider(config: AppConfig, env: EnvSettings) -> MarketDataProvider:
             raise ConfigError("Alpaca market-data credentials missing (ALPACA_API_KEY / ALPACA_API_SECRET)")
         from app.market_data.alpaca_provider import AlpacaMarketDataProvider
 
+        # The single Alpaca market-data adapter (Phase B). Credentials come from
+        # the environment only and are never logged or embedded in events.
         return AlpacaMarketDataProvider(
             env.alpaca_api_key,
             env.alpaca_api_secret,
             feed=config.market_data.feed,
             reconnect=config.market_data.reconnect,
+            bus=bus,
         )
     raise ConfigError(f"unsupported market data provider: {provider}")
 
