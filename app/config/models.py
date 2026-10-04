@@ -83,12 +83,25 @@ class ReconnectConfig(_Section):
     max_delay_seconds: float = 60.0
 
 
+class MockMarketConfig(_Section):
+    """Deterministic mock provider knobs (paper/test only; never live).
+
+    ``tick_seconds`` is how much *market time* each synthetic tick advances.
+    It must be large enough that timeframe candles (and therefore regime
+    warm-up) accumulate within the demo's tick budget.
+    """
+
+    tick_seconds: float = 120.0
+    seed: int = 7
+
+
 class MarketDataConfig(_Section):
     provider: Literal["alpaca", "mock"] = "alpaca"
     feed: str = "crypto"
     websocket_enabled: bool = True
     reconnect: ReconnectConfig = Field(default_factory=ReconnectConfig)
     max_age_seconds: float = 5.0
+    mock: MockMarketConfig = Field(default_factory=MockMarketConfig)
 
 
 class TimeframesConfig(_Section):

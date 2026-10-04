@@ -33,6 +33,22 @@ class BreakoutMomentumStrategy(Strategy):
         if atr is None or atr <= 0:
             return None
 
+        # FEATURE SAFETY (Phase A #2): the strategy requires a fully formed
+        # feature set. Missing RSI / EMAs / VWAP mean "cannot evaluate" —
+        # never silently treat them as confirming values. The momentum and
+        # trend helpers already return False on None, but the explicit gate
+        # here documents the requirement and keeps reason construction honest.
+        if not features.ready:
+            return None
+
+        # REGIME SAFETY (Phase A #1): an UNKNOWN regime must never produce a
+        # signal that claims a confirmed regime. WAIT for classification.
+        # _trend_long/_trend_short only block *contradicting* trends; without
+        # this gate, UNKNOWN + fast>slow EMA would emit "bullish_regime AND
+        # trend_confirmed", which is a false regime claim.
+        if context.regime.is_unknown:
+            return None
+
         if not self._volatility_ok(atr):
             return None
         if not self._spread_ok(features.spread_percent):
@@ -49,9 +65,13 @@ class BreakoutMomentumStrategy(Strategy):
         if close > above and self._momentum_long(rsi) and self._trend_long(context):
             reasons = [
                 ReasonCode.BREAKOUT_ABOVE_RANGE,
-                ReasonCode.BULLISH_REGIME,
                 ReasonCode.MOMENTUM_CONFIRMED,
             ]
+            # Regime claims are only attached when the regime actually allows
+            # this direction; the UNKNOWN gate above already returned, and
+            # allows_long is False for range_bound/high/low-volatility regimes.
+            if context.regime.allows_long:
+                reasons.append(ReasonCode.BULLISH_REGIME)
             if self.config.trend.enabled and self._above_vwap(features):
                 reasons.append(ReasonCode.TREND_CONFIRMED)
             if features.spread_percent is not None:
@@ -61,9 +81,10 @@ class BreakoutMomentumStrategy(Strategy):
         if close < below and self._momentum_short(rsi) and self._trend_short(context):
             reasons = [
                 ReasonCode.BREAKOUT_BELOW_RANGE,
-                ReasonCode.BEARISH_REGIME,
                 ReasonCode.MOMENTUM_CONFIRMED,
             ]
+            if context.regime.allows_short:
+                reasons.append(ReasonCode.BEARISH_REGIME)
             if self.config.trend.enabled and self._below_vwap(features):
                 reasons.append(ReasonCode.TREND_CONFIRMED)
             if features.spread_percent is not None:
@@ -84,6 +105,10 @@ class BreakoutMomentumStrategy(Strategy):
         return rsi is not None and self.config.momentum.rsi_min_short <= rsi <= self.config.momentum.rsi_max_short
 
     def _trend_long(self, context: StrategyContext) -> bool:
+        # REGIME SAFETY: UNKNOWN means "not classified" — it must never count
+        # as trend confirmation. WAIT for a classified regime instead.
+        if context.regime.is_unknown:
+            return False
         if context.regime.is_trending and not context.regime.allows_long:
             return False
         if not self.config.trend.enabled:
@@ -93,6 +118,9 @@ class BreakoutMomentumStrategy(Strategy):
         return fast is not None and slow is not None and fast > slow
 
     def _trend_short(self, context: StrategyContext) -> bool:
+        # REGIME SAFETY: symmetric to _trend_long.
+        if context.regime.is_unknown:
+            return False
         if context.regime.is_trending and not context.regime.allows_short:
             return False
         if not self.config.trend.enabled:
@@ -102,12 +130,19 @@ class BreakoutMomentumStrategy(Strategy):
         return fast is not None and slow is not None and fast < slow
 
     def _above_vwap(self, features) -> bool:
+        # FEATURE SAFETY (Phase A #2): a missing VWAP is "unknown", not "above".
+        # Treating None as True let signals pass with incomplete features.
         vwap = features.vwap
-        return vwap is None or (features.close is not None and features.close >= vwap)
+        if vwap is None:
+            return False
+        return features.close is not None and features.close >= vwap
 
     def _below_vwap(self, features) -> bool:
+        # FEATURE SAFETY: symmetric to _above_vwap.
         vwap = features.vwap
-        return vwap is None or (features.close is not None and features.close <= vwap)
+        if vwap is None:
+            return False
+        return features.close is not None and features.close <= vwap
 
     def _volatility_ok(self, atr: float) -> bool:
         cfg = self.config.volatility
@@ -118,6 +153,14 @@ class BreakoutMomentumStrategy(Strategy):
         return True
 
     def _spread_ok(self, spread_percent: float | None) -> bool:
+        # FEATURE SAFETY (Phase A #2): spread is execution-quality metadata, not
+        # a required strategy feature — it is only available when a live quote
+        # snapshot exists. A missing spread is NEVER fabricated into a passing
+        # value: the SPREAD_ACCEPTABLE reason is attached only when a real
+        # measurement exists (see evaluate()). Live quote freshness is enforced
+        # upstream by the market-data staleness gate and RiskEngine, so an absent
+        # spread (e.g. the historical backtest, which has no quotes) simply means
+        # "not measurable", not "acceptable".
         if spread_percent is None:
             return True
         return spread_percent <= self.config.spread.maximum_percent

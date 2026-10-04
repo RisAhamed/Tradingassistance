@@ -20,11 +20,14 @@ from app.storage.repository import Repository
 def create_provider(config: AppConfig, env: EnvSettings) -> MarketDataProvider:
     provider = config.market_data.provider
     if provider == "mock":
-        # 1 tick = 1 minute of market time so candle timeframes roll quickly.
+        # 1 tick = a fixed span of market time (config-driven) so candle
+        # timeframes roll quickly enough to warm up the regime classifier.
+        mock = config.market_data.mock
         return MockMarketDataProvider(
             config.trading.symbol,
             spread_percent=config.risk.maximum_spread_percent,
-            tick_seconds=60.0,
+            tick_seconds=mock.tick_seconds,
+            seed=mock.seed,
         )
     if provider == "alpaca":
         if not env.has_alpaca_credentials():

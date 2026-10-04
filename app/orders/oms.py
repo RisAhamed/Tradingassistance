@@ -27,6 +27,8 @@ class OMS:
         self._orders: dict[str, Order] = {}
         self._by_client_id: dict[str, str] = {}
         self._submitted: set[str] = set()
+        # FILL SAFETY: fill markers already applied per order (idempotency).
+        self._applied_fills: dict[str, set[str]] = {}
 
     # -- creation -----------------------------------------------------------
     def create(self, intent: OrderIntent) -> Order:
@@ -49,7 +51,16 @@ class OMS:
         return order
 
     def validate(self, order: Order) -> bool:
-        if order.quantity <= 0:
+        # ORDER VALIDATION (Phase A #5/#6): the OMS is the last gate before the
+        # broker. Non-finite / non-positive quantities must never be submitted.
+        import math
+
+        quantity = order.quantity
+        if (
+            not isinstance(quantity, (int, float))
+            or not math.isfinite(quantity)
+            or quantity <= 0
+        ):
             order.status = OrderStatus.REJECTED
             order.reject_reason = "invalid_quantity"
             return False
@@ -58,8 +69,17 @@ class OMS:
 
     # -- submission ---------------------------------------------------------
     async def submit(self, order: Order) -> tuple[Order, BrokerExecution]:
+        # ORDER IDEMPOTENCY (Phase A #6): the same order object — or the same
+        # client_order_id bound to a *different* order object — must never be
+        # submitted twice. Duplicate submission would create duplicate exposure.
         if self.duplicate_protection and order.order_id in self._submitted:
             raise DuplicateOrderError(f"order {order.order_id} already submitted")
+        if self.duplicate_protection:
+            known_id = self._by_client_id.get(order.client_order_id)
+            if known_id is not None and known_id != order.order_id:
+                raise DuplicateOrderError(
+                    f"client order {order.client_order_id} already bound to {known_id}"
+                )
         if order.status not in (OrderStatus.NEW, OrderStatus.VALIDATED):
             raise ValueError(f"cannot submit order in state {order.status}")
 
@@ -82,6 +102,15 @@ class OMS:
         return order, execution
 
     def apply_fill(self, order: Order, fill: Fill) -> Order:
+        # FILL SAFETY (Phase A #7): duplicate fill events must never
+        # double-count quantity. The OMS tracks applied fill markers per order
+        # (broker_fill_id preferred, fill_id fallback) and ignores replays.
+        marker = fill.broker_fill_id or fill.fill_id
+        seen = self._applied_fills.setdefault(order.order_id, set())
+        if marker and marker in seen:
+            return order
+        if marker:
+            seen.add(marker)
         total_qty = order.filled_quantity + fill.quantity
         if total_qty > 0 and order.average_fill_price is not None:
             weighted = order.average_fill_price * order.filled_quantity + fill.price * fill.quantity

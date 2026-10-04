@@ -46,6 +46,10 @@ market_data:
     max_delay_seconds: 60
   # A snapshot older than this is considered stale and blocks new entries.
   max_age_seconds: 5
+  # Deterministic mock provider (paper/test only; used when provider: mock).
+  mock:
+    tick_seconds: 120        # synthetic market-time advanced per tick
+    seed: 7
 
 timeframes:
   context: 15m               # market context

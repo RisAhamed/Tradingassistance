@@ -31,6 +31,8 @@ class PositionManager:
         self.position = Position.flat(
             symbol, position_id=new_position_id(), session_id=session_id
         )
+        # FILL SAFETY: markers of fills already applied (idempotency).
+        self._seen_fills: set[str] = set()
 
     # -- queries ------------------------------------------------------------
     @property
@@ -56,6 +58,19 @@ class PositionManager:
     ) -> PositionUpdate:
         update = PositionUpdate()
         position = self.position
+        # FILL SAFETY (Phase A #7): invalid fills must never corrupt position
+        # state. Non-positive quantities and non-positive prices are rejected
+        # (positions are derived from actual fills, so a bad fill is worse
+        # than a missed fill — the miss is caught by reconciliation).
+        # Duplicate fills (same broker_fill_id / fill_id replay) are ignored
+        # idempotently so replays cannot double-count quantity.
+        if fill.quantity <= 0 or fill.price <= 0:
+            return update
+        marker = fill.broker_fill_id or fill.fill_id
+        if marker and marker in self._seen_fills:
+            return update
+        if marker:
+            self._seen_fills.add(marker)
         signed_qty = fill.quantity if fill.side is Side.BUY else -fill.quantity
 
         if position.is_flat:

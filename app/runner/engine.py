@@ -130,6 +130,9 @@ class TradingEngine:
         self._last_account_refresh: datetime | None = None
         self._tick_task: asyncio.Task | None = None
         self._last_exit_check: datetime | None = None
+        # MARKET-DATA SAFETY: last accepted update timestamp per symbol, used
+        # to reject out-of-order / duplicate ticks (never invent prices).
+        self._last_update_at: dict[str, datetime] = {}
 
     # -- component wiring ---------------------------------------------------
     async def _wire(self) -> None:
@@ -244,10 +247,60 @@ class TradingEngine:
 
     # -- market data --------------------------------------------------------
     async def on_market_update(self, update: MarketUpdate) -> None:
-        """Provider callback: normalize -> store -> (ticks) -> candle close."""
+        """Provider callback: normalize -> store -> (ticks) -> candle close.
+
+        MARKET-DATA SAFETY (Phase A #3): never invent replacement prices.
+        Updates for an unexpected symbol, with a non-positive price, or whose
+        timestamp does not advance that stream's clock (quotes and trades are
+        tracked separately) are rejected and logged — they can never create
+        new entries.
+        """
+        now = utcnow()
+        symbol = getattr(update, "symbol", None)
+        if symbol != self.symbol:
+            logger.warning(
+                "unexpected symbol rejected",
+                extra={
+                    "structured": {
+                        "event": "INVALID_MARKET_DATA",
+                        "component": "engine",
+                        "symbol": symbol,
+                        "expected": self.symbol,
+                    }
+                },
+            )
+            return
         if isinstance(update, Quote):
+            if update.bid <= 0 or update.ask <= 0 or update.ask < update.bid:
+                logger.warning(
+                    "invalid quote rejected",
+                    extra={
+                        "structured": {
+                            "event": "INVALID_MARKET_DATA",
+                            "component": "engine",
+                            "symbol": symbol,
+                        }
+                    },
+                )
+                return
+            if self._is_out_of_order(symbol, update.timestamp, "quote"):
+                return
             self.store.update_quote(update)
         elif isinstance(update, Trade):
+            if update.price <= 0 or update.size < 0:
+                logger.warning(
+                    "invalid trade rejected",
+                    extra={
+                        "structured": {
+                            "event": "INVALID_MARKET_DATA",
+                            "component": "engine",
+                            "symbol": symbol,
+                        }
+                    },
+                )
+                return
+            if self._is_out_of_order(symbol, update.timestamp, "trade"):
+                return
             self.store.update_trade(update)
             for candle in self.aggregator.add_trade(update):
                 self.store.add_candle(candle)
@@ -279,6 +332,34 @@ class TradingEngine:
                 "ask": snapshot.ask if snapshot else None,
             },
         )
+
+    def _is_out_of_order(self, symbol: str, timestamp: datetime, kind: str) -> bool:
+        """Reject out-of-order / duplicate ticks; return True when dropped.
+
+        MARKET-DATA SAFETY (Phase A #3): a quote and its paired trade legitimately
+        share one market timestamp, so quotes and trades are tracked as
+        independent streams. Within a stream, any tick whose timestamp does not
+        strictly advance the clock is a duplicate or a replay — drop it so
+        replays can never manufacture entries. Valid ticks must advance time.
+        """
+        key = f"{symbol}:{kind}"
+        last = self._last_update_at.get(key)
+        if last is not None and timestamp <= last:
+            logger.warning(
+                "out_of_order_or_duplicate tick rejected",
+                extra={
+                    "structured": {
+                        "event": "INVALID_MARKET_DATA",
+                        "component": "engine",
+                        "symbol": symbol,
+                        "kind": kind,
+                        "reason": "out_of_order_or_duplicate",
+                    }
+                },
+            )
+            return True
+        self._last_update_at[key] = timestamp
+        return False
 
     def _features_for(self, timeframe: str, now: datetime):
         candles = self.store.candles(self.symbol, timeframe)
@@ -337,6 +418,19 @@ class TradingEngine:
         features = self._features_for(self.config.timeframes.signal, now)
         self.state.features = features
         self.state.last_evaluation_at = now
+        logger.debug(
+            "FEATURES UPDATED",
+            extra={
+                "structured": {
+                    "event": "FEATURES_UPDATED",
+                    "component": "features",
+                    "timeframe": self.config.timeframes.signal,
+                    "candle_count": features.candle_count,
+                    "ready": features.ready,
+                    "missing": features.missing,
+                }
+            },
+        )
         await self.bus.emit(
             EventType.FEATURES_UPDATED,
             payload={"timeframe": self.config.timeframes.signal, "values": features.numeric_values()},
@@ -346,6 +440,34 @@ class TradingEngine:
         if regime is None:
             regime = self.regime_engine.classify(features, now=now)
             self.state.record_regime(regime)
+
+        # REGIME SAFETY: report explicitly why evaluation cannot proceed.
+        if regime.is_unknown:
+            logger.debug(
+                "STRATEGY WAIT — regime unknown",
+                extra={
+                    "structured": {
+                        "event": "STRATEGY_EVALUATED",
+                        "component": "strategy",
+                        "result": "wait_regime_unknown",
+                        "reason": regime.reason,
+                    }
+                },
+            )
+            return None
+        if not features.ready:
+            logger.debug(
+                "STRATEGY WAIT — features not ready",
+                extra={
+                    "structured": {
+                        "event": "STRATEGY_EVALUATED",
+                        "component": "strategy",
+                        "result": "wait_features_not_ready",
+                        "missing": features.missing,
+                    }
+                },
+            )
+            return None
 
         if not self.config.strategy.enabled:
             return None
@@ -514,6 +636,10 @@ class TradingEngine:
         return OrderType.LIMIT if self.config.execution.order_type == "limit" else OrderType.MARKET
 
     async def _submit_entry(self, signal: StrategySignal) -> None:
+        # RISK AUTHORITY (Phase A #4): every entry funnels through this method —
+        # strategy, aggregator, and AI tools all call _handle_signal, which
+        # evaluates RiskEngine and only reaches _submit_entry on approval.
+        # There is no alternate order-creation path for entries.
         now = utcnow()
         price = self.state.latest_snapshot.price if self.state.latest_snapshot else None
         max_notional = self._account_equity * (self.config.risk.maximum_position_value_percent / 100.0)
@@ -576,7 +702,7 @@ class TradingEngine:
                     "order_id": order.order_id,
                     "side": order.side.value,
                     "quantity": order.quantity,
-                    "signal_id": signal.signal_id,
+                    "signal_id": order.signal_id,
                 }
             },
         )
@@ -841,7 +967,15 @@ class TradingEngine:
 
     # -- reconciliation -----------------------------------------------------
     async def reconcile(self) -> bool:
-        """Compare broker state with internal state; block entries on mismatch."""
+        """Compare broker state with internal state; block entries on mismatch.
+
+        RECONCILIATION (Phase A #9): broker/account state unknown (query
+        failure) or mismatched blocks new entries — never assume flat.
+        """
+        logger.info(
+            "RECONCILIATION STARTED",
+            extra={"structured": {"event": "RECONCILIATION_STARTED", "component": "engine"}},
+        )
         await self.bus.emit(EventType.RECONCILIATION_STARTED, payload={"symbol": self.symbol})
         try:
             await self.broker.get_account()
@@ -886,7 +1020,11 @@ class TradingEngine:
             await self.bus.emit(EventType.CLOSEOUT_STARTED, payload={"symbol": self.symbol})
             logger.warning(
                 "CLOSEOUT STARTED",
-                extra={"structured": {"event": "CLOSEOUT_STARTED", "component": "session"}},
+                extra={"structured": {"event": "SESSION_CLOSEOUT_STARTED", "component": "session"}},
+            )
+            logger.warning(
+                "FLATTEN REQUESTED",
+                extra={"structured": {"event": "FLATTEN_REQUESTED", "component": "session"}},
             )
 
         closeout = self.config.session_closeout
@@ -957,6 +1095,13 @@ class TradingEngine:
             HealthState.HEALTHY if broker_health.connected else HealthState.ERROR,
             broker_health.detail,
         )
+        provider_health = self.provider.health()
+        if not self._stale_flag:
+            self.state.set_component(
+                "market_data",
+                HealthState.HEALTHY if provider_health.connected else HealthState.ERROR,
+                provider_health.detail,
+            )
         self.state.set_component(
             "database",
             HealthState.HEALTHY if (self.repository and self.repository.available) else HealthState.WARNING,
@@ -985,6 +1130,11 @@ class TradingEngine:
         elif not stale and self._stale_flag:
             self._stale_flag = False
             self.state.set_component("market_data", HealthState.HEALTHY, self.provider.health().detail)
+            logger.info(
+                "MARKET DATA FRESH",
+                extra={"structured": {"event": "MARKET_DATA_CONNECTED", "component": "engine"}},
+            )
+            await self.bus.emit(EventType.MARKET_DATA_CONNECTED, payload={"symbol": self.symbol})
 
     def _risk_status(self, now: datetime) -> dict:
         equity = self._account_equity
@@ -1015,25 +1165,28 @@ class TradingEngine:
     # -- control (human + AI, through the same command layer) --------------
     async def pause(self, *, source: str = "human", reason: str = "paused") -> None:
         self.session.pause(reason)
-        logger.warning(
-            "SESSION PAUSED",
-            extra={"structured": {"event": "SESSION_STATE_CHANGED", "component": "session", "source": source, "state": SessionState.PAUSED.value}},
-        )
-        await self.bus.emit(
-            EventType.SESSION_STATE_CHANGED,
-            payload={"state": SessionState.PAUSED.value, "source": source, "reason": reason},
-        )
+        if self.session.state is SessionState.PAUSED:
+            logger.warning(
+                "SESSION PAUSED",
+                extra={"structured": {"event": "SESSION_STATE_CHANGED", "component": "session", "source": source, "state": SessionState.PAUSED.value}},
+            )
+            await self.bus.emit(
+                EventType.SESSION_STATE_CHANGED,
+                payload={"state": SessionState.PAUSED.value, "source": source, "reason": reason},
+            )
 
     async def resume(self, *, source: str = "human") -> None:
+        before = self.session.state
         self.session.resume()
-        logger.info(
-            "SESSION RESUMED",
-            extra={"structured": {"event": "SESSION_STATE_CHANGED", "component": "session", "source": source, "state": SessionState.TRADING.value}},
-        )
-        await self.bus.emit(
-            EventType.SESSION_STATE_CHANGED,
-            payload={"state": SessionState.TRADING.value, "source": source},
-        )
+        if before is SessionState.PAUSED and self.session.state is SessionState.TRADING:
+            logger.info(
+                "SESSION RESUMED",
+                extra={"structured": {"event": "SESSION_STATE_CHANGED", "component": "session", "source": source, "state": SessionState.TRADING.value}},
+            )
+            await self.bus.emit(
+                EventType.SESSION_STATE_CHANGED,
+                payload={"state": SessionState.TRADING.value, "source": source},
+            )
 
     async def request_reconciliation(self, *, source: str = "human") -> bool:
         logger.info(
