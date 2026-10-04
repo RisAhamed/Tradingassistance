@@ -157,7 +157,7 @@ def create_router() -> APIRouter:
         snapshot = engine.state.latest_snapshot
         provider_health = engine.provider.health()
         age = snapshot.age_seconds(_now()) if snapshot else None
-        limit = runtime.config.market_data.max_age_seconds
+        limit = runtime.config.market_data.freshness.threshold_seconds
         candles: dict[str, object] = {}
         for timeframe in engine.timeframes:
             current = engine.aggregator.current(timeframe)
@@ -176,6 +176,17 @@ def create_router() -> APIRouter:
             "max_age_seconds": limit,
             "data_status": "STALE" if age is None or age > limit else "LIVE",
             "candles": candles,
+        }
+
+    @router.get("/api/warmup")
+    async def warmup_status(request: Request):
+        runtime = _runtime(request)
+        engine = runtime.engine
+        return {
+            "warmup": engine.warmup_status(),
+            "freshness": runtime.config.market_data.freshness.model_dump(mode="json"),
+            "risk_stale_threshold_seconds": runtime.config.risk.stale_market_data.maximum_age_seconds,
+            "history": runtime.config.market_data.history.model_dump(mode="json"),
         }
 
     @router.get("/api/config")

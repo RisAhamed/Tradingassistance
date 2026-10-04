@@ -29,9 +29,13 @@ RISK -> POSITION SIZE -> OMS -> BROKER -> FILL -> POSITION -> P&L
 | --- | --- |
 | Phase A baseline hardening | **Complete** (regime/feature/market-data/risk/sizing/order/fill/session/reconcile/AI safety + config source-of-truth) |
 | **Phase B: real Alpaca market data** | **Complete — execution disabled by default** |
+| **Phase C: historical warm-up** | **Complete — strategy-ready at startup (~3 s) instead of ~5 h** |
 | Execution gate | `execution.enabled: false` — fail-closed master kill-switch for orders |
 | Alpaca market-data websocket (read-only) | **Verified live** against `wss://stream.data.alpaca.markets` |
-| Automated tests | **91 passing** (`pytest tests`) |
+| Historical warm-up (1m bars) | **Verified live** — 626 bars → 51×15m / 151×5m / 626×1m candles |
+| Features + regime after restart | **Ready** (`features.ready=true`, regime `trending_bullish`) |
+| Live handoff | **Verified** — gap 4.02 candles, within tolerance, no duplicates |
+| Automated tests | **112 passing** (`pytest tests`) |
 | `scripts/demo_mock.py` (offline, deterministic) | **Passing** — signals → orders → trade → verified flat |
 | `python -m app.backtesting.run --length 600` (synthetic) | **Passing** — 35 signals, 26 entries |
 | FastAPI + SSE + dashboard | **Working**, with a prominent `EXECUTION: DISABLED` banner |
@@ -77,7 +81,7 @@ All commands are run from the repository root. On Windows use
 
 - Config lives in `pyproject.toml` (`asyncio_mode = "auto"`, `testpaths = ["tests"]`).
 - No network/credentials needed — tests use the mock provider/broker and an
-  offline AI provider. Expect **91 passed**.
+  offline AI provider. Expect **112 passed**.
 
 Coverage by file (the safety contract is executable here):
 
@@ -95,6 +99,7 @@ Coverage by file (the safety contract is executable here):
 | `test_config_observability.py` | no secrets in `config.yaml`; dashboard panels; startup events |
 | `test_phase_b_execution_gate.py` | **execution disabled blocks order creation + submission, never connects the broker, visible on dashboard/API; full pipeline still runs** |
 | `test_phase_b_market_data.py` | Alpaca normalization, malformed-message rejection, duplicate/out-of-order ticks, candle boundaries/gaps, feature warm-up, reconnect/reconnect-failure, secret-free logs |
+| `test_phase_c_warmup.py` | derived warm-up depth, historical normalization (dup/out-of-order/malformed/empty), warm-up→features→regime, live handoff, gap fail-closed, reconcile-not-retry policy, freshness measurement vs risk policy |
 
 ### Offline deterministic demo
 
@@ -387,6 +392,82 @@ websocket. It prints a pass/fail checklist.
    legitimately `UNKNOWN` and the strategy waits. The acceptance script reports
    `warmup.candles_remaining` so you know how far along you are.
 
+## Phase C — historical warm-up (strategy-ready at startup)
+
+Phase C removes the Phase B warm-up problem: the app no longer needs ~5 hours of
+live trading before it can evaluate the strategy.
+
+```text
+HISTORICAL 1m BARS -> NORMALIZE -> CANDLE HISTORY (1m/5m/15m)
+                   -> FEATURES -> REGIME -> STRATEGY READY -> LIVE STREAM
+```
+
+```yaml
+# configs/config.yaml
+market_data:
+  history:
+    enabled: true
+    provider: alpaca          # none | alpaca
+    required: false           # true => a failed warm-up is not ready
+    bar_timeframe: "1m"       # canonical startup source
+    lookback_bars: null       # null => DERIVED from the pipeline config
+    maximum_history_bars: 10000
+    startup_timeout_seconds: 30
+    max_gap_candles: 5        # history->live gap tolerance (fail-closed)
+```
+
+**Required depth is calculated, not hardcoded.** `compute_warmup_requirement()`
+inspects the live configuration (EMA periods, RSI/ATR periods, range lookback,
+breakout lookback, `regime.min_candles`) and converts it into base-timeframe
+bars. With the shipped config that is:
+
+| Driver | Value |
+| --- | --- |
+| `ema` | 50 (from `features.ema.periods`) |
+| `rsi` / `atr` | 15 |
+| `range_lookback` / `breakout_lookback` | 21 |
+| `regime_min_candles` | 20 |
+| **base candles** | **50** (deepest) |
+| signal candles (5m) | 250 |
+| context candles (15m) | 750 |
+| **1-minute bars requested** | **751** |
+
+Historical 1-minute bars are folded through the **existing** `CandleAggregator`
+(one print per bar), so `1m`/`5m`/`15m` come from the same aggregation code as
+live data — there is no second pipeline.
+
+**Live handoff & gaps.** After warm-up the engine records
+`last_historical_at` and seeds the trade watermark, so a replayed live update
+cannot duplicate a historical bar. The first accepted live update completes the
+handoff (`LIVE_HANDOFF_COMPLETED`) and reports the gap; a gap larger than
+`max_gap_candles` sets `data_integrity` unhealthy and blocks entries.
+
+**Freshness vs risk policy.** `market_data.freshness` *measures* freshness
+(`threshold_seconds`, used by health/dashboard); `risk.stale_market_data`
+decides whether staleness *blocks entries*, and `freshness.stale_action` chooses
+`block_entries` (default, fail-closed) or `warn_only`.
+
+**Ambiguous submissions.** `execution.retry.action: reconcile` — the schema only
+admits `reconcile`; a blind retry is unrepresentable.
+
+### Verified real-data restart (read-only, execution disabled)
+
+```
+WarmupRequested   bars=751 timeframe=1m
+WarmupReceived    received=626 first=05:32 last=18:02Z
+WarmupCandlesBuilt 15m=51  5m=151  1m=626
+WarmupFeaturesReady ready=True
+WarmupRegimeReady  regime=trending_bullish
+LiveHandoffCompleted last_hist=18:02:00Z first_live=18:06:01Z gap=4.02 candles (within tolerance)
+orders = 0   execution = DISABLED
+```
+
+Run it yourself:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\acceptance_alpaca.py --seconds 240
+```
+
 ## Configuration — one source of truth
 
 Two layers, deliberately separated:
@@ -431,6 +512,7 @@ Secrets (never in `config.yaml`): `ALPACA_API_KEY`, `ALPACA_API_SECRET`,
 | `GET /api/session`, `/api/events`, `/api/logs`, `/api/ai/status` | session, events, log tail, AI status |
 | `GET /api/config` | sanitized configuration |
 | `GET /api/execution` | **execution gate status** (`ENABLED`/`DISABLED`, reason) |
+| `GET /api/warmup` | warm-up status: required/requested/historical bars, feature & regime readiness, last historical + first live timestamps, handoff, gap, freshness policy |
 | `GET /api/market/status` | live feed state: provider, connected, symbol, bid/ask/last, spread, data age/status, current 1m/5m/15m candles |
 | `GET /api/stream` | SSE live event stream (used by the dashboard) |
 | `POST /api/control/{pause,resume,flatten,reconcile}` | human controls (same layer as AI) |
@@ -460,17 +542,18 @@ Secrets (never in `config.yaml`): `ALPACA_API_KEY`, `ALPACA_API_SECRET`,
 - **Paper trading only** — no live execution path exists by design.
 - **Candles are built from trades, not quotes.** On Alpaca's crypto feed
   `BTC/USD` quotes arrive continuously but **trades are very sparse** (measured:
-  ~1 trade per 18 s). A short observation window may therefore complete **no**
-  candle, so features/regime do not advance yet. This is expected, not a fault:
-  normalization was verified (0 malformed rejections). Consequences:
-  - `regime.min_candles` (20) completed `15m` context candles ≈ **5 hours** of
-    streaming before the first regime classification;
-  - full feature readiness needs `ema_50`, i.e. ~50 signal candles.
-  Phase C options: subscribe to **1-minute bars** instead of raw trades, and/or
-  backfill historical bars at startup to warm up without waiting.
-- `market_data.max_age_seconds: 5` is tight for a sparse feed and makes
-  `MARKET_DATA_STALE` flap between updates. It is fail-closed (entries stay
-  blocked) but may need tuning for real crypto data.
+  ~1 trade per 18 s). Phase C fixes the *warm-up* problem (history supplies the
+  candles/features/regime immediately), but the **live** stream still advances
+  slowly, so:
+  - a fresh `MARKET_DATA_STALE` may still appear between sparse trades
+    (fail-closed: entries stay blocked meanwhile);
+  - the live handoff gap is typically a few candles (observed 4.02, tolerance 5).
+  A natural next step is to subscribe to **1-minute bars** on the live stream too,
+  which would make live candles deterministic.
+- `market_data.freshness.threshold_seconds` (30 s) is the *measurement*; the
+  blocking threshold remains `risk.stale_market_data.maximum_age_seconds` (5 s),
+  which is intentionally tight for a sparse feed and needs review before
+  execution is ever enabled.
 - The AI supervisor is optional and cannot flatten or trade; it is a read-only
   investigation layer unless permissions are explicitly widened (they are not).
 - The backtest/demo P&L is synthetic and is **not** evidence of profitability.

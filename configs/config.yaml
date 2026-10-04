@@ -44,8 +44,23 @@ market_data:
     max_attempts: 10
     initial_delay_seconds: 1
     max_delay_seconds: 60
-  # A snapshot older than this is considered stale and blocks new entries.
-  max_age_seconds: 5
+  # Freshness MEASUREMENT (what the dashboard/health report). The risk decision
+  # to BLOCK entries lives in risk.stale_market_data — kept separate on purpose.
+  freshness:
+    threshold_seconds: 30      # data older than this is reported as STALE
+    stale_action: block_entries  # block_entries | warn_only
+  # Historical warm-up (start from a ready state instead of waiting hours).
+  # provider "none" disables it; "alpaca" pulls 1-minute bars and derives the
+  # configured timeframes from them.
+  history:
+    enabled: true
+    provider: none             # none | alpaca
+    required: false            # true => a failed warm-up is not ready
+    bar_timeframe: "1m"        # canonical startup source
+    lookback_bars: null        # null => derive from EMA/RSI/ATR/lookbacks
+    maximum_history_bars: 10000
+    startup_timeout_seconds: 30
+    max_gap_candles: 5         # history->live gap tolerance (fail-closed)
   # Deterministic mock provider (paper/test only; used when provider: mock).
   mock:
     tick_seconds: 120        # synthetic market-time advanced per tick
@@ -148,9 +163,11 @@ execution:
   slippage:
     protection_enabled: true
     maximum_percent: 0.20
+  # Ambiguous submission (timeout / unknown outcome) is NEVER blindly retried —
+  # it is reconciled instead, because resubmitting can duplicate exposure.
   retry:
-    enabled: true
-    maximum_attempts: 3
+    action: reconcile
+    max_reconcile_attempts: 3
   duplicate_order_protection: true
 
 session_closeout:

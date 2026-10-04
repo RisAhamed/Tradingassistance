@@ -29,6 +29,17 @@ from app.events.types import EventType
 from app.runtime import build_runtime
 
 WATCHED = [
+    EventType.WARMUP_STARTED,
+    EventType.WARMUP_REQUESTED,
+    EventType.WARMUP_RECEIVED,
+    EventType.WARMUP_CANDLES_BUILT,
+    EventType.WARMUP_FEATURES_READY,
+    EventType.WARMUP_REGIME_READY,
+    EventType.WARMUP_COMPLETED,
+    EventType.WARMUP_FAILED,
+    EventType.LIVE_HANDOFF_STARTED,
+    EventType.LIVE_HANDOFF_COMPLETED,
+    EventType.DATA_GAP,
     EventType.ALPACA_CONNECTING,
     EventType.ALPACA_CONNECTED,
     EventType.ALPACA_SUBSCRIPTION_STARTED,
@@ -59,6 +70,10 @@ async def run(seconds: int) -> int:
     config.execution.enabled = False        # ORDER SUBMISSION IS OFF
     config.ai.enabled = False               # AI must not touch execution
     config.ai.permissions.allow_flatten = False
+    # Phase C: warm up from real Alpaca history before the live stream starts.
+    config.market_data.history.enabled = True
+    config.market_data.history.provider = "alpaca"
+    config.market_data.history.required = True
     config.logging.console.format = "structured"
     configure_logging(config, env, project_root=PROJECT_ROOT)
 
@@ -95,21 +110,25 @@ async def run(seconds: int) -> int:
     context_need = config.regime.min_candles
     warmup_remaining = max(0, context_need - context_have)
 
+    warm = engine.warmup_status()
     checks = [
-        ("1. Alpaca connects", counts.get(EventType.ALPACA_CONNECTED.value, 0) > 0),
-        ("2. subscription started", counts.get(EventType.ALPACA_SUBSCRIPTION_STARTED.value, 0) > 0),
-        ("3. market data arrived", snapshot is not None),
-        ("4. data normalized", bool(snapshot and snapshot.price and snapshot.price > 0)),
-        ("5. candles formed", any(v > 0 for v in candles.values())),
-        ("6. features computed", bool(features and features.candle_count > 0)),
-        (
-            # Not yet classified during warm-up is the CORRECT behaviour.
-            "7. regime classified, or legitimately UNKNOWN/pending warm-up",
-            regime is None or regime.is_unknown or regime.regime.value != "unknown",
-        ),
-        ("8. execution disabled", payload["execution"]["status"] == "DISABLED"),
-        ("9. NO order created", len(engine.oms.all_orders()) == 0),
-        ("10. position flat", engine.position_manager.is_flat),
+        # --- Phase C: historical warm-up -----------------------------------
+        ("W1. historical data requested", counts.get(EventType.WARMUP_REQUESTED.value, 0) > 0),
+        ("W2. historical data received", counts.get(EventType.WARMUP_RECEIVED.value, 0) > 0),
+        ("W3. warm-up completed", warm.get("status") == "completed"),
+        ("W4. features ready from history", bool(warm.get("features_ready"))),
+        ("W5. regime ready from history", bool(warm.get("regime_ready"))),
+        # --- live stream ---------------------------------------------------
+        ("L1. Alpaca connects", counts.get(EventType.ALPACA_CONNECTED.value, 0) > 0),
+        ("L2. subscription started", counts.get(EventType.ALPACA_SUBSCRIPTION_STARTED.value, 0) > 0),
+        ("L3. live data arrived", snapshot is not None),
+        ("L4. data normalized", bool(snapshot and snapshot.price and snapshot.price > 0)),
+        ("L5. handoff completed", warm.get("live_handoff") == "completed"),
+        ("L6. no excessive data gap", bool(warm.get("gap", {}).get("within_tolerance", True))),
+        # --- safety --------------------------------------------------------
+        ("S1. execution disabled", payload["execution"]["status"] == "DISABLED"),
+        ("S2. NO order created", len(engine.oms.all_orders()) == 0),
+        ("S3. position flat", engine.position_manager.is_flat),
     ]
 
     print("\n--- MARKET STATE ---")
@@ -136,6 +155,19 @@ async def run(seconds: int) -> int:
             "signals": len(engine.state.recent_signals),
             "risk_decision": engine._last_decision.reason.value if engine._last_decision else None,
             "orders": len(engine.oms.all_orders()),
+            "warmup": {
+                "status": warm.get("status"),
+                "required_bars": warm.get("required_bars"),
+                "requested_bars": warm.get("requested_bars"),
+                "historical_candles": warm.get("historical_candles"),
+                "candles_built": warm.get("historical_candles_built") or candles,
+                "features_ready": warm.get("features_ready"),
+                "regime_ready": warm.get("regime_ready"),
+                "last_historical_at": warm.get("last_historical_at"),
+                "first_live_at": warm.get("first_live_at"),
+                "live_handoff": warm.get("live_handoff"),
+                "gap": warm.get("gap"),
+            },
         },
         indent=2,
         default=str,

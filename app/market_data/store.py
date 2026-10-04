@@ -46,6 +46,22 @@ class MarketStore:
         series = per_symbol.setdefault(candle.timeframe, deque(maxlen=self.max_candles))
         series.append(candle)
 
+    def upsert_candle(self, candle: Candle) -> None:
+        """Insert or replace the in-progress candle for a bucket.
+
+        Used by historical warm-up: a candle that is still open is replaced as it
+        grows, completed candles are never rewritten, and out-of-order rows are
+        ignored so replaying history can never corrupt the series.
+        """
+        per_symbol = self._candles.setdefault(candle.symbol, {})
+        series = per_symbol.setdefault(candle.timeframe, deque(maxlen=self.max_candles))
+        if series and series[-1].timestamp == candle.timestamp:
+            series[-1] = candle
+            return
+        if series and candle.timestamp < series[-1].timestamp:
+            return
+        series.append(candle)
+
     # -- queries ------------------------------------------------------------
     def snapshot(self, symbol: str) -> MarketSnapshot | None:
         return self._snapshots.get(symbol)

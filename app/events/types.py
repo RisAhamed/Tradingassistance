@@ -13,6 +13,17 @@ from app.core.ids import new_event_id
 
 class EventType(str, Enum):
     CANDLE_STARTED = "CandleStarted"
+    WARMUP_STARTED = "WarmupStarted"
+    WARMUP_REQUESTED = "WarmupRequested"
+    WARMUP_RECEIVED = "WarmupReceived"
+    WARMUP_CANDLES_BUILT = "WarmupCandlesBuilt"
+    WARMUP_FEATURES_READY = "WarmupFeaturesReady"
+    WARMUP_REGIME_READY = "WarmupRegimeReady"
+    WARMUP_COMPLETED = "WarmupCompleted"
+    WARMUP_FAILED = "WarmupFailed"
+    LIVE_HANDOFF_STARTED = "LiveHandoffStarted"
+    LIVE_HANDOFF_COMPLETED = "LiveHandoffCompleted"
+    DATA_GAP = "DataGap"
     CANDLE_COMPLETED = "CandleCompleted"
     CANDLE_REJECTED = "CandleRejected"
     STRATEGY_EVALUATED = "StrategyEvaluated"

@@ -95,12 +95,52 @@ class MockMarketConfig(_Section):
     seed: int = 7
 
 
+class HistoricalDataConfig(_Section):
+    """Historical warm-up bars (Phase C).
+
+    ``provider: none`` disables warm-up entirely. ``required: true`` makes a failed
+    warm-up a readiness failure (fail-closed). ``lookback_bars: null`` means the
+    required depth is *derived* from the configured pipeline (EMA/RSI/ATR/lookbacks)
+    rather than hardcoded.
+    """
+
+    enabled: bool = True
+    provider: Literal["alpaca", "none"] = "none"
+    required: bool = False
+    bar_timeframe: str = "1m"
+    lookback_bars: int | None = None
+    maximum_history_bars: int = 10000
+    startup_timeout_seconds: float = 30.0
+    # A gap larger than this many base candles between the last historical bar and
+    # the first live update marks the data as not trustworthy for trading.
+    max_gap_candles: int = 5
+
+    @model_validator(mode="after")
+    def _provider_needs_credentials(self) -> "HistoricalDataConfig":
+        if self.enabled and self.provider != "none" and not self.bar_timeframe:
+            raise ValueError("market_data.history.bar_timeframe is required when warm-up is enabled")
+        return self
+
+
+class DataFreshnessConfig(_Section):
+    """Separates *measuring* freshness from *risk policy* on stale data.
+
+    ``threshold_seconds`` is the measurement used for monitoring/dashboard.
+    The blocking decision belongs to ``risk.stale_market_data`` — this only says
+    what to DO about it once freshness is lost.
+    """
+
+    threshold_seconds: float = 30.0
+    stale_action: Literal["block_entries", "warn_only"] = "block_entries"
+
+
 class MarketDataConfig(_Section):
     provider: Literal["alpaca", "mock"] = "alpaca"
     feed: str = "crypto"
     websocket_enabled: bool = True
     reconnect: ReconnectConfig = Field(default_factory=ReconnectConfig)
-    max_age_seconds: float = 5.0
+    freshness: DataFreshnessConfig = Field(default_factory=DataFreshnessConfig)
+    history: HistoricalDataConfig = Field(default_factory=HistoricalDataConfig)
     mock: MockMarketConfig = Field(default_factory=MockMarketConfig)
 
 
@@ -243,9 +283,16 @@ class SlippageConfig(_Section):
     maximum_percent: float = 0.20
 
 
-class RetryConfig(_Section):
-    enabled: bool = True
-    maximum_attempts: int = 3
+class AmbiguousRetryConfig(_Section):
+    """Policy for an *ambiguous* order submission (timeout / unknown outcome).
+
+    Phase A deliberately removed blind order retries, because resubmitting can
+    duplicate exposure. This configuration states the real behaviour explicitly
+    instead of implying an automatic retry.
+    """
+
+    action: Literal["reconcile"] = "reconcile"
+    max_reconcile_attempts: int = 3
 
 
 class ExecutionConfig(_Section):
@@ -261,7 +308,7 @@ class ExecutionConfig(_Section):
     order_type: Literal["market", "limit"] = "market"
     allow_short: bool = True
     slippage: SlippageConfig = Field(default_factory=SlippageConfig)
-    retry: RetryConfig = Field(default_factory=RetryConfig)
+    retry: AmbiguousRetryConfig = Field(default_factory=AmbiguousRetryConfig)
     duplicate_order_protection: bool = True
 
 

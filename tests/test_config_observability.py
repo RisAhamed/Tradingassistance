@@ -43,7 +43,8 @@ def test_tunables_come_from_config():
     assert config.position_sizing.quantity_precision >= 0
     assert config.dashboard.port > 0
     assert config.ai.provider  # provider is configurable, not hardcoded
-    assert config.execution.retry.maximum_attempts >= 1
+    # Ambiguous submissions are reconciled, never blindly retried (Phase A).
+    assert config.execution.retry.action == "reconcile"
 
 
 def test_sanitized_config_excludes_secret_values():

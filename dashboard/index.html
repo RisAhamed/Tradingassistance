@@ -41,6 +41,7 @@
   <main>
     <section><h2>System</h2><pre id="system">loading…</pre></section>
     <section><h2>Market Data</h2><pre id="mdata">loading…</pre></section>
+    <section><h2>Warm-Up</h2><pre id="warm">loading…</pre></section>
     <section><h2>Execution</h2><pre id="exec">loading…</pre></section>
     <section><h2>Market</h2><pre id="market">loading…</pre></section>
     <section><h2>Features</h2><pre id="features">loading…</pre></section>
@@ -64,10 +65,10 @@
     }
     async function refresh() {
       try {
-        const [health, system, market, mdata, execution, features, regime, strategy, risk, positions, pnl, orders, session, ai] =
+        const [health, system, market, mdata, warm, execution, features, regime, strategy, risk, positions, pnl, orders, session, ai] =
           await Promise.all([
             get("/health"), get("/api/system/status"), get("/api/market/latest"), get("/api/market/status"),
-            get("/api/execution"),
+            get("/api/warmup"), get("/api/execution"),
             get("/api/features"), get("/api/regime"), get("/api/strategy/status"), get("/api/risk/status"), get("/api/positions"),
             get("/api/pnl"), get("/api/orders"), get("/api/session"), get("/api/ai/status"),
           ]);
@@ -92,7 +93,7 @@
           (md.symbol ? " · " + md.symbol : "");
         $("conn").className = "banner " + (md.data_status === "LIVE" ? "ok" : "warn");
 
-        show("system", system); show("mdata", md); show("exec", execution); show("market", market);
+        show("system", system); show("mdata", md); show("warm", warm); show("exec", execution); show("market", market);
         show("features", features); show("regime", regime);
         show("strategy", strategy); show("risk", risk); show("position", positions);
         show("pnl", pnl); show("orders", orders); show("sess", session); show("ai", ai);

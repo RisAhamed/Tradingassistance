@@ -43,6 +43,11 @@ from app.execution.executor import ExecutionResult, OrderExecutor
 from app.features.engine import FeatureEngine
 from app.market_data.aggregator import CandleAggregator
 from app.market_data.base import MarketDataProvider, MarketUpdate
+from app.market_data.history import (
+    AlpacaHistoricalDataClient,
+    compute_warmup_requirement,
+    timeframe_minutes,
+)
 from app.market_data.store import MarketStore
 from app.monitoring.health import HealthRegistry
 from app.monitoring.state import SystemState
@@ -83,14 +88,20 @@ class TradingEngine:
 
         timeframes = [config.timeframes.context, config.timeframes.signal, config.timeframes.execution]
         self.timeframes = list(dict.fromkeys(timeframes))
-        self.store = MarketStore(self.timeframes)
-        # Phase B #5: candles whose bucket just opened (drained per tick).
+        self.store = MarketStore(self.timeframes, max_candles=2000)
+        # Phase C: candles whose bucket just opened (drained per tick).
         self._candle_started: list = []
         self.aggregator = CandleAggregator(
             self.symbol,
             self.timeframes,
             on_candle_started=self._candle_started.append,
         )
+        # Phase C: historical warm-up state and the live handoff boundary.
+        self.history_client = AlpacaHistoricalDataClient(config, env)
+        self.warmup: dict = self._warmup_state(status="pending", reason=None)
+        self._last_historical_at: datetime | None = None
+        self._live_handoff_done = False
+        self._data_gap_ok = True
 
         self.feature_engine = FeatureEngine(config.features)
         self.regime_engine = RegimeEngine(
@@ -226,6 +237,22 @@ class TradingEngine:
         if self.repository is not None:
             await self.repository.init()
 
+        # Phase C: warm up from history BEFORE the live stream starts, so the
+        # pipeline is strategy-ready immediately and the live feed only appends.
+        warm = await self.warm_up()
+        history = self.config.market_data.history
+        if not warm and history.required and history.provider != "none":
+            logger.critical(
+                "WARMUP REQUIRED BUT FAILED — system stays not-ready",
+                extra={
+                    "structured": {
+                        "event": "WARMUP_FAILED",
+                        "component": "engine",
+                        "reason": self.warmup.get("reason"),
+                    }
+                },
+            )
+
         await self._wire()
 
         if reconcile:
@@ -285,6 +312,14 @@ class TradingEngine:
             "reconciliation",
             lambda: not self._need_reconciliation,
             detail="broker vs internal",
+            critical=True,
+        )
+        self.health.register(
+            # Phase C: a history->live gap larger than the configured tolerance
+            # makes the data untrustworthy for trading until it is re-warmed.
+            "data_integrity",
+            lambda: self._data_gap_ok,
+            detail="history/live continuity",
             critical=True,
         )
 
@@ -388,6 +423,7 @@ class TradingEngine:
                 )
                 return
             self.store.update_trade(update)
+            await self._on_live_handoff(update.timestamp)
             closed = self.aggregator.add_trade(update)
             for started in self._candle_started:
                 await self._emit_candle_started(started)
@@ -676,10 +712,262 @@ class TradingEngine:
         await self._handle_signal(signal)
         return signal
 
+    # -- historical warm-up (Phase C) -----------------------------------------
+    async def warm_up(self) -> bool:
+        """Seed the pipeline from historical bars so it starts strategy-ready.
+
+        Architecture: HISTORICAL -> NORMALIZE -> CANDLE HISTORY -> FEATURES ->
+        REGIME -> (ready) -> LIVE STREAM. Historical 1-minute bars are folded
+        through the *existing* candle aggregator, so derived timeframes are built
+        by exactly the same code path as live data.
+        """
+        history = self.config.market_data.history
+        if not history.enabled or history.provider == "none":
+            self.warmup = self._warmup_state(status="skipped", reason="history_disabled")
+            return False
+
+        requirement = compute_warmup_requirement(self.config)
+        bars = history.lookback_bars or requirement.history_bars_needed
+        bars = min(bars, history.maximum_history_bars)
+        self.warmup = self._warmup_state(
+            status="running",
+            reason=None,
+            requirement=requirement.as_dict(),
+            requested_bars=bars,
+            required_bars=requirement.history_bars_needed,
+        )
+        await self._warmup_event(EventType.WARMUP_STARTED, "WARMUP STARTED", symbol=self.symbol)
+        await self._warmup_event(
+            EventType.WARMUP_REQUESTED,
+            "WARMUP REQUESTED",
+            symbol=self.symbol,
+            provider=history.provider,
+            timeframe=requirement.history_timeframe,
+            bars=bars,
+            derived_from=requirement.reasons,
+        )
+
+        try:
+            candles = await self.history_client.fetch_candles(
+                symbol=self.symbol,
+                bars=bars,
+                timeframe=requirement.history_timeframe,
+                timeout_seconds=history.startup_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 - warm-up failure must stay safe
+            await self._warmup_failed(f"history_fetch_failed: {exc}")
+            return False
+
+        if not candles:
+            await self._warmup_failed("empty_history")
+            return False
+
+        await self._warmup_event(
+            EventType.WARMUP_RECEIVED,
+            "WARMUP RECEIVED",
+            symbol=self.symbol,
+            received=len(candles),
+            first=candles[0].timestamp.isoformat(),
+            last=candles[-1].timestamp.isoformat(),
+        )
+
+        built = self._build_history_candles(candles)
+        await self._warmup_event(
+            EventType.WARMUP_CANDLES_BUILT,
+            "WARMUP CANDLES BUILT",
+            symbol=self.symbol,
+            candles={tf: len(built.get(tf, [])) for tf in self.timeframes},
+        )
+
+        features = self._features_for(self.config.timeframes.signal, utcnow())
+        self.state.features = features
+        features_ready = bool(features.ready)
+        await self._warmup_event(
+            EventType.WARMUP_FEATURES_READY,
+            "WARMUP FEATURES READY" if features_ready else "WARMUP FEATURES NOT READY",
+            ready=features_ready,
+            missing=features.missing,
+        )
+
+        context_features = self._features_for(self.config.timeframes.context, utcnow())
+        regime = self.regime_engine.classify(context_features, now=utcnow())
+        self.state.record_regime(regime)
+        await self._warmup_event(
+            EventType.WARMUP_REGIME_READY,
+            "WARMUP REGIME READY" if not regime.is_unknown else "WARMUP REGIME NOT READY",
+            regime=regime.regime.value,
+            reason=regime.reason,
+        )
+
+        if not features_ready or regime.is_unknown:
+            self.warmup.update(
+                {
+                    "features_ready": features_ready,
+                    "regime_ready": not regime.is_unknown,
+                    "historical_candles": len(candles),
+                    "last_historical_at": candles[-1].timestamp.isoformat(),
+                }
+            )
+            await self._warmup_failed("insufficient_history")
+            return False
+
+        await self._complete_warmup(candles, built)
+        return True
+
+    async def _complete_warmup(self, candles: list, built: dict) -> None:
+        """Record the warm-up result and arm the live handoff watermark."""
+        # Seed the trade watermark so the first live update cannot duplicate a
+        # historical bar, and record the boundary for gap detection.
+        self._last_historical_at = candles[-1].timestamp
+        self._live_handoff_done = False
+        self._last_update_at[f"{self.symbol}:trade"] = self._last_historical_at
+
+        self.warmup.update(
+            {
+                "status": "completed",
+                "features_ready": True,
+                "regime_ready": True,
+                "historical_candles": len(candles),
+                "historical_candles_built": {tf: len(built.get(tf, [])) for tf in self.timeframes},
+                "last_historical_at": self._last_historical_at.isoformat(),
+                "live_handoff": "pending",
+            }
+        )
+
+        await self._warmup_event(
+            EventType.WARMUP_COMPLETED,
+            "WARMUP COMPLETED",
+            symbol=self.symbol,
+            historical_candles=len(candles),
+            last_historical_at=self._last_historical_at.isoformat(),
+        )
+        await self._warmup_event(
+            EventType.LIVE_HANDOFF_STARTED,
+            "LIVE HANDOFF STARTED",
+            last_historical_at=self._last_historical_at.isoformat(),
+        )
+
+    def _build_history_candles(self, history: list) -> dict[str, list]:
+        """Fold historical bars into every configured timeframe.
+
+        Each base bar is replayed through the live candle aggregator as a single
+        print (timestamp = bar close), so 1m/5m/15m are produced by the same
+        aggregation code used for live data — no second pipeline.
+        """
+        aggregator = CandleAggregator(self.symbol, self.timeframes)
+        for bar in history:
+            aggregator.add_trade(
+                Trade(timestamp=bar.timestamp, symbol=self.symbol, price=bar.close, size=bar.volume)
+            )
+            for timeframe in self.timeframes:
+                current = aggregator.current(timeframe)
+                if current is not None:
+                    self.store.upsert_candle(current)
+        return {timeframe: self.store.candles(self.symbol, timeframe) for timeframe in self.timeframes}
+
+    async def _on_live_handoff(self, timestamp: datetime) -> None:
+        """First accepted live update after warm-up: measure the gap, then hand off."""
+        if self._live_handoff_done or self._last_historical_at is None:
+            return
+        self._live_handoff_done = True
+        gap_seconds = (timestamp - self._last_historical_at).total_seconds()
+        base_minutes = timeframe_minutes(self.config.market_data.history.bar_timeframe)
+        gap_candles = max(0.0, gap_seconds / (base_minutes * 60.0))
+        allowed = self.config.market_data.history.max_gap_candles
+        within = gap_candles <= allowed
+        self.warmup.update(
+            {
+                "first_live_at": timestamp.isoformat(),
+                "live_handoff": "completed",
+                "gap": {
+                    "detected": gap_seconds > 0,
+                    "seconds": gap_seconds,
+                    "candles": gap_candles,
+                    "within_tolerance": within,
+                },
+            }
+        )
+        if not within:
+            # Fail-closed: a history->live gap we cannot trust keeps the system
+            # unhealthy (and therefore not trading) until it is re-warmed.
+            self._data_gap_ok = False
+            logger.error(
+                "DATA GAP after warm-up",
+                extra={
+                    "structured": {
+                        "event": "DATA_GAP",
+                        "component": "engine",
+                        "gap_candles": gap_candles,
+                        "allowed": allowed,
+                    }
+                },
+            )
+            await self.bus.emit(
+                EventType.DATA_GAP, payload={"gap_candles": gap_candles, "allowed": allowed}
+            )
+        await self._warmup_event(
+            EventType.LIVE_HANDOFF_COMPLETED,
+            "LIVE HANDOFF COMPLETED",
+            last_historical_at=self._last_historical_at.isoformat(),
+            first_live_at=timestamp.isoformat(),
+            gap_candles=gap_candles,
+            gap_within_tolerance=within,
+        )
+
+    async def _warmup_failed(self, reason: str) -> None:
+        self.warmup.update({"status": "failed", "reason": reason})
+        logger.error(
+            "WARMUP FAILED",
+            extra={
+                "structured": {
+                    "event": "WARMUP_FAILED",
+                    "component": "engine",
+                    "reason": reason,
+                    "symbol": self.symbol,
+                }
+            },
+        )
+        await self.bus.emit(EventType.WARMUP_FAILED, payload={"reason": reason, "symbol": self.symbol})
+
+    async def _warmup_event(self, event_type: EventType, message: str, **fields) -> None:
+        logger.info(message, extra={"structured": {"event": event_type.value, "component": "engine", **fields}})
+        await self.bus.emit(event_type, payload=fields)
+
+    def _warmup_state(self, *, status: str, reason: str | None, **extra) -> dict:
+        base = {
+            "status": status,
+            "reason": reason,
+            "features_ready": False,
+            "regime_ready": False,
+            "historical_candles": 0,
+            "historical_candles_built": {},
+            "required_bars": None,
+            "requested_bars": None,
+            "last_historical_at": None,
+            "first_live_at": None,
+            "live_handoff": "pending",
+            "gap": {"detected": False, "seconds": None, "candles": None, "within_tolerance": True},
+        }
+        base.update(extra)
+        return base
+
+    def warmup_status(self) -> dict:
+        """Warm-up + handoff state for the dashboard/API (sanitized)."""
+        status = dict(self.warmup)
+        status["execution"] = self.execution_status()["status"]
+        return status
+
     # -- risk gate ----------------------------------------------------------
     def _build_risk_context(self, now: datetime) -> RiskContext:
         age = self.store.data_age(self.symbol, now)
-        fresh = age is not None and age <= self.config.risk.stale_market_data.maximum_age_seconds
+        # Risk POLICY (fail-closed): the blocking threshold is a risk setting, and
+        # `market_data.freshness.stale_action` decides whether losing freshness
+        # actually blocks entries or only warns.
+        freshness = self.config.market_data.freshness
+        measured = age is not None and age <= self.config.risk.stale_market_data.maximum_age_seconds
+        fresh = measured if freshness.stale_action == "block_entries" else True
+        if not self._data_gap_ok:
+            fresh = False
         position = self.position_manager.position
         return RiskContext(
             now=now,
@@ -1351,7 +1639,10 @@ class TradingEngine:
 
     async def _update_data_health(self, now: datetime) -> None:
         age = self.store.data_age(self.symbol, now)
-        limit = self.config.risk.stale_market_data.maximum_age_seconds
+        # Freshness MEASUREMENT (Phase C): what the dashboard/health report use.
+        # The entry-BLOCKING decision stays in risk.stale_market_data and is
+        # applied in _build_risk_context — measurement and policy are separate.
+        limit = self.config.market_data.freshness.threshold_seconds
         stale = age is None or age > limit
         if stale and not self._stale_flag:
             self._stale_flag = True
@@ -1435,6 +1726,7 @@ class TradingEngine:
         data["health"] = self.health.report()
         data["paper_trading_only"] = True
         data["execution"] = self.execution_status()
+        data["warmup"] = self.warmup_status()
         return data
 
     @property
