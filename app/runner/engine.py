@@ -64,6 +64,7 @@ from app.portfolio.position_sizing import PositionSizer
 from app.regime.engine import RegimeEngine
 from app.recovery import RecoveryState, RecoveryStateMachine
 from app.risk.engine import RiskContext, RiskEngine
+from app.accounting.ledger import FillLedger
 from app.runner.factories import create_broker, create_provider
 from app.sessions.manager import SessionManager
 from app.strategies.base import StrategyContext
@@ -176,6 +177,9 @@ class TradingEngine:
         self._flatten_in_progress = False
         self._last_order_sync: datetime | None = None
         self._broker_fill_synced: dict[str, float] = {}
+        # D.5.4: authoritative fill ledger is the single source of truth used
+        # for both OMS and PositionManager / PnL derivations.
+        self.fill_ledger = FillLedger()
         self._last_decision: RiskDecision | None = None
         self._stale_flag = False
         self._last_account_refresh: datetime | None = None
@@ -2240,6 +2244,13 @@ class TradingEngine:
                 await self.bus.emit(EventType.ORDER_REJECTED if updated.status is OrderStatus.REJECTED else EventType.ORDER_CANCELLED, payload=updated.model_dump(mode="json"))
 
     async def _apply_fill(self, order, fill, *, is_exit: bool = False, exit_reason: str | None = None) -> None:
+        # D.5.4: fill is recorded once in the authoritative ledger; downstream
+        # consumers see the same signed quantity stream.
+        ledger_delta = self.fill_ledger.add_fill(fill)
+        if ledger_delta == 0.0:
+            # Duplicate fill: downstream should already treat it as a no-op,
+            # but report it for operational confidence.
+            logger.info("DUPLICATE FILL IGNORED", extra={"structured": {"event": "FILL_DUPLICATE_IGNORED", "component": "accounting", "order_id": order.order_id, "fill_id": fill.fill_id}})
         position = self.position_manager.position
         prior = {
             "direction": position.direction,
