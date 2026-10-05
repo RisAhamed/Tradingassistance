@@ -16,11 +16,12 @@ from datetime import timedelta
 import pytest
 
 from app.config.loader import PROJECT_ROOT, get_env, load_config
-from app.config.models import DataFreshnessConfig, FreshnessBarConfig, TradePlanConfig
+from app.config.models import DataFreshnessConfig, FreshnessBarConfig, PositionSizingConfig, TradePlanConfig
 from app.core.clock import utcnow
 from app.core.logging import configure_logging, reset_logging_state
 from app.decision.freshness import FreshnessPolicy
 from app.decision.trade_plan import TradePlanBuilder
+from app.portfolio.position_sizing import PositionSizer
 from app.domain.enums import Regime
 from app.domain.trade_plan import TradePlanStatus
 from app.runtime import build_runtime
@@ -91,10 +92,17 @@ def _active_plan(builder: TradePlanBuilder | None = None):
     b = builder or _builder()
     # NOTE: the plan timestamp must be *now* — a fixture timestamp in the past
     # would legitimately trip MAXIMUM_HOLDING_EXCEEDED / stale-data checks.
+    signal = make_signal(timestamp=utcnow())
+    sizing = PositionSizer(PositionSizingConfig()).size(
+        signal, 100000.0, reference_price=signal.entry_reference, max_notional=20000.0
+    )
     return b.build_from_signal(
-        make_signal(timestamp=utcnow()),
+        signal,
         regime=make_regime(Regime.TRENDING_BULLISH, timestamp=utcnow()),
         features=make_features(timestamp=utcnow()),
+        sizing=sizing,
+        risk_percent=PositionSizingConfig().risk_per_trade_percent,
+        maximum_notional=20000.0,
     ).plan
 
 

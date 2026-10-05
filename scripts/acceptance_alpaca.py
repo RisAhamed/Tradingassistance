@@ -147,6 +147,11 @@ async def run(seconds: int) -> int:
         ("L5. quotes observable separately", streams["quotes"]["last_at"] is not None),
         ("L6. handoff completed", warm.get("live_handoff") == "completed"),
         ("L7. no excessive data gap", bool(warm.get("gap", {}).get("within_tolerance", True))),
+        ("L8. real timestamps not future-dated", all(
+            stream.get("clock_state") != "FUTURE_TIMESTAMP"
+            for stream in streams.values()
+            if stream.get("last_at") is not None
+        )),
         # --- safety -----------------------------------------------------------
         ("S1. execution disabled", payload["execution"]["status"] == "DISABLED"),
         ("S2. NO order created", len(engine.oms.all_orders()) == 0),
@@ -178,6 +183,7 @@ async def run(seconds: int) -> int:
             "signals": len(engine.state.recent_signals),
             "risk_decision": engine._last_decision.reason.value if engine._last_decision else None,
             "orders": len(engine.oms.all_orders()),
+            "freshness": streams,
             "warmup": {
                 "status": warm.get("status"),
                 "required_bars": warm.get("required_bars"),

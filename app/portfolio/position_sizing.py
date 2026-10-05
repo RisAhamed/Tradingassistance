@@ -22,6 +22,11 @@ class SizingResult:
     rejected_reason: str | None = None
 
     @property
+    def final_risk_amount(self) -> float:
+        """Risk represented by the quantity actually allowed to execute."""
+        return self.final_quantity * self.stop_distance if self.ok else 0.0
+
+    @property
     def ok(self) -> bool:
         return self.rejected_reason is None and self.final_quantity > 0
 

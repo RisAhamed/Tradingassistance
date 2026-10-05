@@ -1682,6 +1682,14 @@ class TradingEngine:
             payload={"signal_id": signal.signal_id, "risk_id": decision.risk_id},
             correlation_id=signal.correlation_id,
         )
+        price = self.state.latest_snapshot.price if self.state.latest_snapshot else signal.entry_reference
+        max_notional = self._account_equity * (self.config.risk.maximum_position_value_percent / 100.0)
+        sizing = self.sizer.size(
+            signal,
+            self._account_equity,
+            reference_price=price,
+            max_notional=max_notional if max_notional > 0 else None,
+        )
         # Phase D: TradePlan
         tp_result = self.trade_plan_builder.build_from_signal(
             signal,
@@ -1694,6 +1702,9 @@ class TradingEngine:
             freshness_stale=self.freshness_policy.evaluate(source="bar", last_received=self._last_bar_at, now=now).is_stale,
             correlation_id=signal.correlation_id,
             session_id=signal.session_id,
+            sizing=sizing,
+            risk_percent=self.config.position_sizing.risk_per_trade_percent,
+            maximum_notional=max_notional if max_notional > 0 else None,
         )
         # Phase D.1: supersede any previously ACTIVE plan (a new plan replaces
         # the old one; the old one is kept in history, never reused).
@@ -1740,7 +1751,7 @@ class TradingEngine:
         # Phase D.1: an approved plan may already be invalid (e.g. the session
         # closed or data went stale between risk approval and here).
         await self._invalidate_trade_plan_if_needed(now)
-        await self._submit_entry(signal)
+        await self._submit_entry(signal, sizing=sizing)
 
     async def _record_execution_failure(self, signal: StrategySignal, reason: str) -> None:
         self.session.count("rejections")
@@ -1765,7 +1776,7 @@ class TradingEngine:
 
         return OrderType.LIMIT if self.config.execution.order_type == "limit" else OrderType.MARKET
 
-    async def _submit_entry(self, signal: StrategySignal) -> None:
+    async def _submit_entry(self, signal: StrategySignal, *, sizing=None) -> None:
         # RISK AUTHORITY (Phase A #4): every entry funnels through this method —
         # strategy, aggregator, and AI tools all call _handle_signal, which
         # evaluates RiskEngine and only reaches _submit_entry on approval.
@@ -1773,12 +1784,13 @@ class TradingEngine:
         now = utcnow()
         price = self.state.latest_snapshot.price if self.state.latest_snapshot else None
         max_notional = self._account_equity * (self.config.risk.maximum_position_value_percent / 100.0)
-        sizing = self.sizer.size(
-            signal,
-            self._account_equity,
-            reference_price=price,
-            max_notional=max_notional if max_notional > 0 else None,
-        )
+        if sizing is None:
+            sizing = self.sizer.size(
+                signal,
+                self._account_equity,
+                reference_price=price,
+                max_notional=max_notional if max_notional > 0 else None,
+            )
         logger.info(
             "POSITION SIZE CALCULATED",
             extra={

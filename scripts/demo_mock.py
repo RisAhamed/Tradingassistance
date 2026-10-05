@@ -24,10 +24,9 @@ async def main() -> int:
     config.trading.broker = "mock"
     config.ai.enabled = False
     config.logging.console.format = "structured"
-    # The mock broker is simulated in-process, so the demo explicitly opens the
-    # PHASE B execution gate to exercise the complete pipeline end-to-end.
-    # The shipped default (execution.enabled: false) blocks all order creation.
-    config.execution.enabled = True
+    # Phase D.1.1 is diagnostic only: the execution gate stays closed and the
+    # mock provider exercises the decision pipeline without creating orders.
+    config.execution.enabled = False
     configure_logging(config, env, project_root=PROJECT_ROOT)
 
     runtime = build_runtime(config, env)
@@ -67,13 +66,11 @@ async def main() -> int:
     print("DEMO SUMMARY")
     print(json.dumps(summary, indent=2))
 
-    flat = await engine.flatten(session_closeout=True)
-    summary["flattened"] = flat
     summary["final_flat"] = engine.position_manager.is_flat
-    print(json.dumps({k: summary[k] for k in ("flattened", "final_flat", "session_state")}, indent=2))
+    print(json.dumps({k: summary[k] for k in ("orders", "final_flat", "session_state")}, indent=2))
 
     await runtime.shutdown()
-    return 0 if summary["final_flat"] and summary["health"] != "error" else 1
+    return 0 if summary["orders"] == 0 and summary["final_flat"] and summary["health"] != "error" else 1
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from app.core.clock import utcnow
 from app.core.ids import new_order_id
 from app.domain.enums import Direction
 from app.domain.trade_plan import TradePlan, TradePlanStatus
+from app.portfolio.position_sizing import SizingResult
 
 
 @dataclass(slots=True)
@@ -35,6 +36,9 @@ class TradePlanBuilder:
         freshness_stale: bool = False,
         correlation_id: str | None = None,
         session_id: str | None = None,
+        sizing: SizingResult | None = None,
+        risk_percent: float | None = None,
+        maximum_notional: float | None = None,
     ) -> TradePlanBuildResult:
         now = utcnow()
         events: list[dict[str, Any]] = []
@@ -43,13 +47,10 @@ class TradePlanBuilder:
             snapshot=snapshot, freshness_stale=freshness_stale,
         )
         entry_ready = all(c["met"] for c in entry_conditions)
-        stop_price, target_price = self._stop_target(signal, features)
-        risk_amount = self._risk_amount(signal, features, snapshot)
-        position_quantity = None
-        if signal.entry_reference and stop_price and risk_amount > 0:
-            distance = abs(signal.entry_reference - stop_price)
-            if distance > 0:
-                position_quantity = risk_amount / distance
+        stop_price, target_price = self._stop_target(signal, features, use_signal_levels=sizing is not None)
+        risk_amount = sizing.final_risk_amount if sizing is not None else 0.0
+        position_quantity = sizing.final_quantity if sizing is not None and sizing.ok else None
+        sizing_reason = sizing.rejected_reason if sizing is not None else None
         expected_holding = self._expected_holding(regime, features)
         maximum_holding = self.config.maximum_holding_minutes
         maximum_holding = self.config.maximum_holding_minutes
@@ -59,6 +60,21 @@ class TradePlanBuilder:
         else:
             status = TradePlanStatus.ACTIVE
         reasons = [signal.reason] if signal.reason else []
+        if sizing_reason:
+            reasons.append(f"sizing_blocked:{sizing_reason}")
+        if sizing is not None and not sizing.ok:
+            entry_ready = False
+            status = TradePlanStatus.WAIT
+        final_notional = (
+            position_quantity * signal.entry_reference
+            if position_quantity is not None and signal.entry_reference is not None
+            else None
+        )
+        risk_reward = (
+            abs(target_price - signal.entry_reference) / abs(signal.entry_reference - stop_price)
+            if target_price is not None and stop_price is not None and signal.entry_reference is not None
+            and abs(signal.entry_reference - stop_price) > 0 else None
+        )
         plan = TradePlan(
             plan_id=new_order_id(),
             timestamp=now,
@@ -75,6 +91,14 @@ class TradePlanBuilder:
             target_price=target_price if entry_ready else None,
             risk_amount=risk_amount,
             position_quantity=position_quantity,
+            equity_snapshot=sizing.equity if sizing is not None else None,
+            risk_percent=risk_percent,
+            risk_budget=sizing.risk_budget if sizing is not None else None,
+            stop_distance=sizing.stop_distance if sizing is not None else None,
+            maximum_notional=maximum_notional,
+            final_notional=final_notional,
+            final_risk_amount=risk_amount,
+            risk_reward=risk_reward,
             expected_holding_minutes=expected_holding,
             maximum_holding_minutes=maximum_holding,
             entry_conditions=entry_conditions,
@@ -93,6 +117,11 @@ class TradePlanBuilder:
                 "atr": features.atr,
                 "strategy_version": getattr(signal, "strategy_version", None),
                 "source_signal_id": getattr(signal, "signal_id", None),
+                "risk_budget_source": "position_sizer" if sizing is not None else None,
+                "equity_snapshot_source": "risk_context.account_equity" if sizing is not None else None,
+                "risk_percent_source": "position_sizing.risk_per_trade_percent" if sizing is not None else None,
+                "stop_distance_source": "position_sizer.signal.risk_distance" if sizing is not None else None,
+                "final_risk_source": "position_sizer.final_quantity * stop_distance" if sizing is not None else None,
             },
         )
         events.append({"event": "TRADE_PLAN_CREATED" if status == TradePlanStatus.ACTIVE else "TRADE_PLAN_UPDATED", "plan_id": plan.plan_id, "status": status.value, "entry_ready": entry_ready})
@@ -141,20 +170,24 @@ class TradePlanBuilder:
             {"name": "signal_actionable", "met": signal.direction in (Direction.LONG, Direction.SHORT), "detail": str(signal.direction.value if signal.direction else None)},
         ]
 
-    def _stop_target(self, signal, features):
+    def _stop_target(self, signal, features, *, use_signal_levels: bool = False):
         atr = features.atr
-        if atr is None or atr <= 0 or signal.entry_reference is None:
+        if signal.entry_reference is None:
             return None, None
-        stop = signal.entry_reference - self.config.stop_atr_multiplier * atr
-        target = signal.entry_reference + self.config.target_atr_multiplier * atr
+        if use_signal_levels and signal.stop_reference is not None and abs(signal.entry_reference - signal.stop_reference) > 0:
+            stop = signal.stop_reference
+        elif atr is not None and atr > 0:
+            stop = signal.entry_reference - self.config.stop_atr_multiplier * atr
+        else:
+            return None, None
+        target = signal.take_profit_reference if use_signal_levels else None
+        if target is None:
+            direction = getattr(signal.direction, "value", signal.direction)
+            multiplier = self.config.target_atr_multiplier * atr if atr is not None and atr > 0 else None
+            if multiplier is None:
+                return stop, None
+            target = signal.entry_reference + multiplier if direction == "long" else signal.entry_reference - multiplier
         return stop, target
-
-    def _risk_amount(self, signal, features, snapshot):
-        notional = 100_000.0
-        risk_pct = 0.01
-        if snapshot and snapshot.price:
-            notional = snapshot.price * 1.0
-        return notional * risk_pct
 
     def _exit_conditions(self):
         return [{"name": "target_reached", "active": True}, {"name": "stop_reached", "active": True}, {"name": "regime_change", "active": True}, {"name": "invalidation", "active": True}, {"name": "maximum_holding", "active": True}, {"name": "spread_deterioration", "active": True}]

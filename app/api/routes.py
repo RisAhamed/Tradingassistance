@@ -225,6 +225,7 @@ def create_router() -> APIRouter:
             "freshness_policy": payload.get("freshness_policy"),
             "timeframe_selection": payload.get("timeframe_selection"),
             "trade_plan": payload.get("trade_plan"),
+            "decision_trace": payload.get("decision_trace", []),
         }
 
     @router.get("/api/trade-plan")

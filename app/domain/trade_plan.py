@@ -43,6 +43,14 @@ class TradePlan(BaseModel):
     target_price: float | None
     risk_amount: float
     position_quantity: float | None
+    equity_snapshot: float | None = None
+    risk_percent: float | None = None
+    risk_budget: float | None = None
+    stop_distance: float | None = None
+    maximum_notional: float | None = None
+    final_notional: float | None = None
+    final_risk_amount: float | None = None
+    risk_reward: float | None = None
     expected_holding_minutes: float | None
     maximum_holding_minutes: float
     entry_conditions: list[dict] = Field(default_factory=list)
