@@ -20,6 +20,7 @@ def _config(*, execution_enabled: bool = False, canonical: bool = True):
     config.logging.console.enabled = False
     config.logging.file.enabled = False
     config.execution.enabled = execution_enabled
+    config.market_data.max_future_skew_seconds = 86400 * 30
     config.market_data.bars.canonical = canonical
     return config
 
@@ -31,7 +32,7 @@ def _engine(**kwargs):
 def _bar(minutes: int, *, base: float = 30000.0, symbol: str = SYMBOL, tf: str = "1m") -> Candle:
     """A well-formed base bar `minutes` after the engine's canonical epoch."""
     return Candle(
-        timestamp=utcnow().replace(second=0, microsecond=0) + timedelta(minutes=minutes),
+        timestamp=(utcnow() - timedelta(hours=24)).replace(second=0, microsecond=0) + timedelta(minutes=minutes),
         symbol=symbol,
         open=base,
         high=base * 1.001,
@@ -63,7 +64,7 @@ async def test_malformed_bar_is_rejected():
     engine = _engine()
     events = await _watch(engine)
     bad = Candle(
-        timestamp=utcnow().replace(second=0, microsecond=0) + timedelta(minutes=1),
+        timestamp=(utcnow() - timedelta(hours=24)).replace(second=0, microsecond=0) + timedelta(minutes=1),
         symbol=SYMBOL, open=1.0, high=2.0, low=0.5, close=1.5, volume=-1.0, timeframe="1m",
     )
     await engine.on_market_update(bad)

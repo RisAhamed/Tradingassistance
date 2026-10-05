@@ -34,7 +34,7 @@ from app.testing import FaultInjectingProvider, build_readiness_matrix, render_m
 SCENARIOS = [
     "none", "missing_bars", "delayed_bars", "duplicate_bars", "out_of_order_bars",
     "disconnect", "stale_data", "history_fetch_failure", "incomplete_recovery",
-    "recovery_timeout",
+    "recovery_timeout", "drop_trades", "drop_quotes", "future_timestamp",
 ]
 
 
@@ -55,6 +55,7 @@ def _config(scenario: str):
         minimum_percent=50.0, maximum_gap_candles=50, on_insufficient="warn"
     )
     config.testing.outage.enabled = True
+    config.market_data.max_future_skew_seconds = 86400 * 30
     config.testing.outage.scenario = scenario
     return config, env
 
@@ -135,6 +136,14 @@ async def run(scenario: str) -> int:
                     failures.append(f"expected {required.value}")
         if scenario == "duplicate_bars" and EventType.BAR_DUPLICATE not in types:
             failures.append("duplicate bars were not rejected")
+        if scenario == "future_timestamp" and EventType.FUTURE_TIMESTAMP_REJECTED not in types:
+            failures.append("future timestamps were not rejected")
+        if scenario in ("drop_trades", "drop_quotes"):
+            # Streams that are never allowed to fabricate replacements: freshness
+            # state must reflect the missing information, and recovery/readiness
+            # must never treat the silence as healthy data.
+            if engine._data_gap_ok is not True and engine.recovery.get("state") not in ("idle", "failed"):
+                failures.append("unexpected recovery state during stream drop")
         if scenario == "out_of_order_bars" and EventType.BAR_OUT_OF_ORDER not in types:
             failures.append("out-of-order bars were not rejected")
         if scenario in ("history_fetch_failure", "incomplete_recovery", "recovery_timeout"):

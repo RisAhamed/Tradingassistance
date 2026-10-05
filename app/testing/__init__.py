@@ -307,6 +307,23 @@ class FaultInjectingProvider:
             return  # silence everything -> data goes stale
         if scenario == "disconnect":
             return  # simulate a dead stream
+        # D.1.3: independent stream drops - no fabricated replacement may appear.
+        if scenario in ("drop_trades", "drop_quotes"):
+            from app.domain.market import Quote, Trade
+
+            if scenario == "drop_trades" and isinstance(update, Trade):
+                return
+            if scenario == "drop_quotes" and isinstance(update, Quote):
+                return
+            return await self._emit(update)
+        # D.1.3: timestamp anomaly - stamp updates in the future.
+        if scenario == "future_timestamp":
+            from datetime import timedelta
+
+            update = update.model_copy(
+                update={"timestamp": update.timestamp + timedelta(days=3650)}
+            )
+            return await self._emit(update)
         if scenario == "delayed_bars" and is_bar:
             self._delayed.append(update)
             if len(self._delayed) <= self.params.get("delay_bars", 3):

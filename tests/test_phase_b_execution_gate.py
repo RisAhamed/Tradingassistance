@@ -29,6 +29,7 @@ def _config(*, execution_enabled: bool):
     config.logging.console.enabled = False
     config.logging.file.enabled = False
     config.execution.enabled = execution_enabled
+    config.market_data.max_future_skew_seconds = 86400 * 30
     return config
 
 

@@ -15,6 +15,7 @@ async def test_engine_phase_d_smoke() -> None:
     cfg.ai.enabled = False
     cfg.storage.enabled = False
     cfg.market_data.provider = "mock"
+    cfg.market_data.max_future_skew_seconds = 86400 * 30
     cfg.trading.broker = "mock"
     runtime = build_runtime(cfg, env)
     await runtime.engine.start()

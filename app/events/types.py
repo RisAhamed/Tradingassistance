@@ -114,6 +114,8 @@ class EventType(str, Enum):
     EXIT_CONDITION_EVALUATED = "ExitConditionEvaluated"
     HOLDING_DURATION_UPDATED = "HoldingDurationUpdated"
     DECISION_BLOCKED = "DecisionBlocked"
+    FUTURE_TIMESTAMP_REJECTED = "FutureTimestampRejected"
+    RECOVERY_STATE_CHANGED = "RecoveryStateChanged"
 
 
 class Event(BaseModel):

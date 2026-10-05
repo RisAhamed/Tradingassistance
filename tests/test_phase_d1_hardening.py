@@ -54,6 +54,7 @@ async def _build_engine():
     config.ai.enabled = False
     config.storage.enabled = False
     config.execution.enabled = False  # Phase D.1 safety: execution stays OFF
+    config.market_data.max_future_skew_seconds = 86400 * 30
     configure_logging(config, env, project_root=PROJECT_ROOT)
     runtime = build_runtime(config, env)
     await runtime.engine.start()
@@ -77,6 +78,7 @@ def _storage_config(tmp_path):
     config.trading.broker = "mock"
     config.ai.enabled = False
     config.execution.enabled = False
+    config.market_data.max_future_skew_seconds = 86400 * 30
     config.storage.enabled = True
     config.storage.url = ""
     config.storage.sqlite_path = str(tmp_path / "d1.sqlite3")

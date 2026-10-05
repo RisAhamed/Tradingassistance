@@ -281,6 +281,25 @@ def create_router() -> APIRouter:
             "rotation": runtime.config.logging.rotation.model_dump(mode="json"),
         }
 
+    @router.get("/api/recovery")
+    async def recovery_status(request: Request):
+        """Recovery state machine + history + recent failure events."""
+        runtime = _runtime(request)
+        engine = runtime.engine
+        recent = [
+            event.to_public()
+            for event in engine.bus.recent(50, event_filter=lambda e: (
+                "RECOVERY" in e.type.value or "DATA_GAP" in e.type.value
+                or "FUTURE_TIMESTAMP" in e.type.value or "ALPACA_" in e.type.value
+            ))
+        ]
+        return {
+            "recovery": engine.recovery,
+            "state_machine": engine.recovery_sm.snapshot(),
+            "history": engine.recovery_sm.history(50),
+            "recent_recovery_events": recent,
+        }
+
     @router.get("/api/decision-trace")
     async def decision_trace(request: Request, limit: int = 100):
         """Reconstructable record of the current/last decision cycle."""

@@ -324,6 +324,7 @@ async def test_unknown_regime_warmup_produces_no_signals_and_no_orders():
     config.logging.console.enabled = False
     config.logging.file.enabled = False
     config.execution.enabled = False
+    config.market_data.max_future_skew_seconds = 86400 * 30
     engine = build_runtime(config, get_env()).engine
 
     await engine.start()

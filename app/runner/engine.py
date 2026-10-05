@@ -62,6 +62,7 @@ from app.portfolio.pnl_engine import PnlEngine
 from app.portfolio.position_manager import PositionManager
 from app.portfolio.position_sizing import PositionSizer
 from app.regime.engine import RegimeEngine
+from app.recovery import RecoveryState, RecoveryStateMachine
 from app.risk.engine import RiskContext, RiskEngine
 from app.runner.factories import create_broker, create_provider
 from app.sessions.manager import SessionManager
@@ -116,6 +117,8 @@ class TradingEngine:
         self._expected_next_bar: datetime | None = None
         self.coverage: dict = {}
         self.recovery: dict = self._recovery_state()
+        self.recovery_sm = RecoveryStateMachine()
+        self.recovery["state_machine"] = self.recovery_sm.snapshot()
         self._recovering = False
         self._readiness_signature: tuple | None = None
         # Bar-stream statistics (observable metrics for soak/readiness reports).
@@ -377,6 +380,12 @@ class TradingEngine:
 
         self._register_health()
 
+        # Phase D.1.3: provider connection lifecycle drives the recovery SM.
+        # Connection alone never restores trade-allowed state.
+        self.bus.subscribe(EventType.ALPACA_DISCONNECTED, self._on_provider_disconnected)
+        self.bus.subscribe(EventType.ALPACA_RECONNECTED, self._on_provider_reconnected)
+        self.bus.subscribe(EventType.ALPACA_RECONNECT_FAILED, self._on_provider_reconnect_failed)
+
         if self.repository is not None:
             await self.repository.init()
 
@@ -521,6 +530,32 @@ class TradingEngine:
         """
         now = utcnow()
         symbol = getattr(update, "symbol", None)
+        # Phase D.1.3 clock-integrity gate: reject future-stamped updates before
+        # they can mutate store/aggregator/feature state.
+        ts = getattr(update, "timestamp", None)
+        if ts is not None:
+            skew = (ts - now).total_seconds()
+            if skew > self.config.market_data.max_future_skew_seconds:
+                logger.warning(
+                    "FUTURE_TIMESTAMP REJECTED",
+                    extra={
+                        "structured": {
+                            "event": "FUTURE_TIMESTAMP_REJECTED",
+                            "component": "engine",
+                            "symbol": symbol,
+                            "source": type(update).__name__,
+                            "timestamp": ts.isoformat(),
+                            "now": now.isoformat(),
+                            "skew_seconds": round(skew, 3),
+                            "threshold_seconds": self.config.market_data.max_future_skew_seconds,
+                        }
+                    },
+                )
+                await self.bus.emit(
+                    EventType.FUTURE_TIMESTAMP_REJECTED,
+                    payload={"symbol": symbol, "source": type(update).__name__, "skew_seconds": round(skew, 3)},
+                )
+                return
         if symbol != self.symbol:
             logger.warning(
                 "unexpected symbol rejected",
@@ -689,6 +724,9 @@ class TradingEngine:
         self.market_stats["bars_received"] += 1
 
         await self._detect_bar_gap(candle)
+        # Phase D.1.3: a gap-free validated bar may restore READY from a
+        # degraded/recovering/resyncing/validating/failed state.
+        self._maybe_restore_from_live_bar()
 
         self._last_bar_at = candle.timestamp
         if self._last_historical_at is not None and candle.timestamp > self._last_historical_at:
@@ -730,8 +768,10 @@ class TradingEngine:
             # Do NOT resume trading just because the socket reconnected: halt
             # entries and run an event-driven historical resync.
             self._data_gap_ok = False
+            self._transition_recovery(RecoveryState.DEGRADED, reason=f"bar_gap:{missing}")
             await self.bus.emit(EventType.DATA_GAP, payload={"missing_bars": missing, "allowed": allowed})
             if self.config.market_data.bars.resync_enabled and not self._recovering:
+                self._transition_recovery(RecoveryState.RECOVERING, reason=f"live_bar_gap:{missing}")
                 await self.resync(reason=f"live_bar_gap:{missing}")
 
     async def _emit_candle_started(self, candle) -> None:
@@ -1348,6 +1388,56 @@ class TradingEngine:
     def _recovery_state(self) -> dict:
         return {"state": "idle", "reason": None, "started_at": None, "completed_at": None, "detail": None}
 
+    # -- Phase D.1.3: recovery state machine wiring --------------------------
+    def _transition_recovery(self, new_state: RecoveryState, *, reason: str | None = None, attempt: int | None = None) -> None:
+        previous = self.recovery_sm.state
+        self.recovery_sm.transition(new_state, reason=reason, attempt=attempt)
+        self.recovery["state_machine"] = self.recovery_sm.snapshot()
+        logger.info(
+            "RECOVERY STATE",
+            extra={
+                "structured": {
+                    "event": "RECOVERY_STATE_CHANGED",
+                    "component": "engine",
+                    "previous_state": previous.value,
+                    "new_state": new_state.value,
+                    "reason": reason,
+                    "recovery_attempt": attempt,
+                }
+            },
+        )
+
+    async def _on_provider_disconnected(self, event) -> None:
+        self._transition_recovery(RecoveryState.DEGRADED, reason="provider_disconnected")
+
+    async def _on_provider_reconnected(self, event) -> None:
+        # Reconnect is NOT readiness: mark RECOVERING; only fresh validated data
+        # (or a successful resync) may promote the machine back to READY/HEALTHY.
+        self._transition_recovery(RecoveryState.RECOVERING, reason="provider_reconnected")
+
+    async def _on_provider_reconnect_failed(self, event) -> None:
+        self._transition_recovery(RecoveryState.RECOVERY_FAILED, reason="provider_reconnect_failed")
+
+    def _maybe_restore_from_live_bar(self) -> None:
+        """Restore READY only after a gap-free, provider-connected live bar.
+
+        This is the validation-after-failure path: data integrity must actually
+        hold (no gap), the provider must be connected, and a fresh bar must have
+        been accepted. Never restores from the reconnect event alone.
+        """
+        if self.recovery_sm.state in (RecoveryState.HEALTHY, RecoveryState.READY):
+            return
+        if self._recovering:
+            return
+        if not self._data_gap_ok:
+            return
+        if not self.provider.health().connected:
+            return
+        self._transition_recovery(
+            RecoveryState.READY,
+            reason="validated_by_live_bar",
+        )
+
     async def resync(self, *, reason: str) -> bool:
         """Event-driven recovery after a large live-data gap.
 
@@ -1385,6 +1475,7 @@ class TradingEngine:
         self._data_gap_ok = False
         history = self.config.market_data.history
         bars_cfg = self.config.market_data.bars
+        self._transition_recovery(RecoveryState.RESYNCING, reason=reason, attempt=attempt)
         await self._warmup_event(
             EventType.RECOVERY_STARTED, "RECOVERY STARTED", reason=reason, attempt=attempt
         )
@@ -1409,14 +1500,17 @@ class TradingEngine:
             )
             features_ok = await self._rebuild_features()
             regime_ok = await self._rebuild_regime()
+            self._transition_recovery(RecoveryState.VALIDATING, reason="resync_validation", attempt=attempt)
             if not (features_ok and regime_ok):
                 raise RuntimeError("post-resync verification failed (features/regime)")
             self._data_gap_ok = True
             self.recovery.update({"state": "completed", "completed_at": utcnow().isoformat()})
+            self._transition_recovery(RecoveryState.READY, reason="resync_validated", attempt=attempt)
             await self._warmup_event(EventType.RECOVERY_COMPLETED, "RECOVERY COMPLETED", reason=reason)
             return True
         except Exception as exc:  # noqa: BLE001 - fail closed, stay not-ready
             self.recovery.update({"state": "failed", "completed_at": utcnow().isoformat(), "detail": str(exc)})
+            self._transition_recovery(RecoveryState.RECOVERY_FAILED, reason=reason, attempt=attempt)
             logger.critical(
                 "RECOVERY FAILED",
                 extra={
@@ -1572,6 +1666,8 @@ class TradingEngine:
             "execution": self.execution_status()["status"],
             "data_integrity_ok": self._data_gap_ok,
             "recovery_state": self.recovery.get("state"),
+            "recovery_state_machine": self.recovery_sm.snapshot(),
+            "recovery_history": self.recovery_sm.history(10),
             "orders": len(self.oms.all_orders()),
         }
 
@@ -1590,6 +1686,10 @@ class TradingEngine:
         )
         fresh = not bar_result.is_stale if fp.stale_action() == "block_entries" else True
         if not self._data_gap_ok:
+            fresh = False
+        # Phase D.1.3 fail-closed gate: the recovery state machine must prove
+        # health/readiness before entries may become executable.
+        if not self.recovery_sm.is_trade_allowed():
             fresh = False
         position = self.position_manager.position
         return RiskContext(

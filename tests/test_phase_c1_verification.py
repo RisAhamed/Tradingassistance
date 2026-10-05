@@ -29,6 +29,7 @@ def _config(execution_enabled: bool = False):
     config.logging.console.enabled = False
     config.logging.file.enabled = False
     config.execution.enabled = execution_enabled
+    config.market_data.max_future_skew_seconds = 86400 * 30
     return config
 
 
@@ -38,7 +39,7 @@ def _engine(execution_enabled: bool = False):
 
 def _bar(minutes: int, *, price: float = 30000.0) -> Candle:
     return Candle(
-        timestamp=utcnow().replace(second=0, microsecond=0) + timedelta(minutes=minutes),
+        timestamp=(utcnow() - timedelta(hours=24)).replace(second=0, microsecond=0) + timedelta(minutes=minutes),
         symbol=SYMBOL, open=price, high=price * 1.001, low=price * 0.999,
         close=price * 1.0005, volume=1.0, timeframe="1m",
     )

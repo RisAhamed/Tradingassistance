@@ -203,6 +203,9 @@ class MarketDataConfig(_Section):
     history: HistoricalDataConfig = Field(default_factory=HistoricalDataConfig)
     bars: LiveBarsConfig = Field(default_factory=LiveBarsConfig)
     mock: MockMarketConfig = Field(default_factory=MockMarketConfig)
+    # Clock integrity: updates stamped further than this into the future are
+    # rejected before they can touch store/aggregator/feature state.
+    max_future_skew_seconds: float = 5.0
 
 
 class TimeframeCandidateConfig(_Section):
@@ -581,6 +584,14 @@ class SoakConfig(_Section):
     maximum_missing_bars: int = 3
     required_live_timeframes: list[str] = Field(default_factory=lambda: ["1m", "5m", "15m"])
     fail_on_unexpected_state: bool = True
+    # D.1.3 soak policy (driven by scripts/soak_alpaca.py when provided).
+    duration_seconds: float | None = None
+    minimum_live_bars: int = 1
+    minimum_live_candles: int = 1
+    maximum_stale_duration_seconds: float = 120.0
+    maximum_recovery_time_seconds: float = 120.0
+    maximum_reconnects: int = 5
+    failure_policy: str = "fail_closed"
 
 
 class OutageConfig(_Section):
@@ -591,10 +602,43 @@ class OutageConfig(_Section):
         "none", "missing_bars", "delayed_bars", "duplicate_bars",
         "out_of_order_bars", "disconnect", "stale_data",
         "history_fetch_failure", "incomplete_recovery", "recovery_timeout",
+        "drop_trades", "drop_quotes", "future_timestamp",
     ] = "none"
     missing_bars: int = 10
     delay_bars: int = 3
     duplicate_bars: int = 2
+
+
+class RecoveryConfig(_Section):
+    """Recovery behaviour after market-data failure (D.1.3)."""
+
+    enabled: bool = True
+    max_attempts: int = 3
+    initial_delay_seconds: float = 1.0
+    maximum_delay_seconds: float = 60.0
+    backoff_multiplier: float = 2.0
+    recovery_timeout_seconds: float = 30.0
+    require_historical_resync: bool = True
+    require_bar_resync: bool = True
+    require_feature_rebuild: bool = True
+    require_regime_rebuild: bool = True
+    require_readiness_revalidation: bool = True
+
+
+class FaultInjectionConfig(_Section):
+    """Deterministic local fault injection (D.1.3). Never auto-enabled."""
+
+    enabled: bool = False
+    scenarios: list[str] = Field(default_factory=list)
+    duration_seconds: float = 60.0
+    disconnect_after_seconds: float = 10.0
+    drop_bars: bool = False
+    drop_trades: bool = False
+    drop_quotes: bool = False
+    duplicate_messages: bool = False
+    out_of_order_messages: bool = False
+    timestamp_anomaly: bool = False
+    gap_candles: int = 3
 
 
 class TestingConfig(_Section):
@@ -626,6 +670,8 @@ class AppConfig(_Section):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     trade_plan: TradePlanConfig = Field(default_factory=TradePlanConfig)
     testing: TestingConfig = Field(default_factory=TestingConfig)
+    recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
+    fault_injection: FaultInjectionConfig = Field(default_factory=FaultInjectionConfig)
 
     @model_validator(mode="after")
     def _session_ordering(self) -> "AppConfig":
