@@ -33,7 +33,7 @@ from app.domain.enums import (
     Side,
 )
 from app.domain.market import Candle, Quote, Trade
-from app.domain.orders import Order, OrderIntent
+from app.domain.orders import Fill, Order, OrderIntent
 from app.domain.pnl import TradeRecord
 from app.domain.regime import RegimeSnapshot
 from app.domain.risk import RiskDecision
@@ -174,6 +174,8 @@ class TradingEngine:
         self._exiting = False
         self._flatten_done = False
         self._flatten_in_progress = False
+        self._last_order_sync: datetime | None = None
+        self._broker_fill_synced: dict[str, float] = {}
         self._last_decision: RiskDecision | None = None
         self._stale_flag = False
         self._last_account_refresh: datetime | None = None
@@ -2167,11 +2169,76 @@ class TradingEngine:
         )
         for fill in result.fills:
             await self._apply_fill(order, fill, is_exit=is_exit, exit_reason=exit_reason)
+        # D.5: mark which broker-side quantity we have already consumed so the
+        # broker-polling sync never double-applies the immediate fills.
+        self._broker_fill_synced[order.order_id] = sum(f.quantity for f in result.fills)
         if self.repository is not None:
             await self.repository.save_order(order)
         return True
 
     # -- fill handling ------------------------------------------------------
+    async def _resync_orders_from_broker(self, now: datetime) -> None:
+        """D.5: authoritative broker-order sync (fill bridge).
+
+        Polls the broker for tracked orders that have not reached a terminal
+        state, applies any not-yet-consumed fill quantities to the OMS and the
+        PositionManager, and emits observability events. Never fabricates a
+        fill: only real broker quantities/prices are applied, and only the
+        unseen delta since the previous sync.
+        """
+        if not self.execution_enabled:
+            return
+        interval = float(getattr(self.config.execution, "order_sync_interval_seconds", 1.0) or 1.0)
+        if self._last_order_sync is not None and (now - self._last_order_sync).total_seconds() < interval:
+            return
+        self._last_order_sync = now
+        for order in list(self.oms.all_orders()):
+            if not order.broker_order_id:
+                continue
+            if order.status in (OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELLED):
+                continue
+            try:
+                updated = await self.broker.get_order(order)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "ORDER STATUS POLL FAILED",
+                    extra={"structured": {"event": "ORDER_STATUS_POLL", "component": "execution", "order_id": order.order_id, "error": str(exc)[:200]}},
+                )
+                continue
+            logger.info(
+                "ORDER STATUS POLL",
+                extra={"structured": {"event": "ORDER_STATUS_POLL", "component": "execution", "order_id": order.order_id, "status": updated.status.value, "filled": updated.filled_quantity}},
+            )
+            already = self._broker_fill_synced.get(order.order_id, 0.0)
+            if updated.filled_quantity > 0 and updated.filled_quantity > already + 1e-12:
+                delta = updated.filled_quantity - already
+                from app.core.ids import new_fill_id
+
+                fill = Fill(
+                    fill_id=new_fill_id(),
+                    order_id=order.order_id,
+                    timestamp=updated.updated_at or now,
+                    symbol=order.symbol,
+                    side=order.side,
+                    quantity=delta,
+                    price=updated.average_fill_price or 0.0,
+                )
+                self._broker_fill_synced[order.order_id] = updated.filled_quantity
+                if updated.status is OrderStatus.FILLED:
+                    await self.bus.emit(EventType.ORDER_FILLED, payload=updated.model_dump(mode="json"))
+                await self.bus.emit(EventType.POSITION_UPDATED, payload={"order_id": order.order_id, "delta_qty": delta, "price": fill.price})
+                self.oms.apply_fill(order, fill)
+                await self._apply_fill(order, fill, is_exit=(order.direction is Direction.FLAT))
+                logger.info(
+                    "POSITION SYNC FROM BROKER",
+                    extra={"structured": {"event": "POSITION_SYNC", "component": "execution", "order_id": order.order_id, "filled": updated.filled_quantity, "price": fill.price}},
+                )
+            if updated.status in (OrderStatus.REJECTED, OrderStatus.CANCELLED) and order.status is not updated.status:
+                order.status = updated.status
+                order.updated_at = utcnow()
+                self.state.record_order(order)
+                await self.bus.emit(EventType.ORDER_REJECTED if updated.status is OrderStatus.REJECTED else EventType.ORDER_CANCELLED, payload=updated.model_dump(mode="json"))
+
     async def _apply_fill(self, order, fill, *, is_exit: bool = False, exit_reason: str | None = None) -> None:
         position = self.position_manager.position
         prior = {
@@ -2643,6 +2710,9 @@ class TradingEngine:
 
         if state is SessionState.CLOSEOUT and not self._flatten_done:
             await self.flatten(session_closeout=True)
+
+        # D.5: bridge broker fills back into local position state.
+        await self._resync_orders_from_broker(now)
 
         await self._update_data_health(now)
 

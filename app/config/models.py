@@ -425,6 +425,8 @@ class ExecutionConfig(_Section):
     slippage: SlippageConfig = Field(default_factory=SlippageConfig)
     retry: AmbiguousRetryConfig = Field(default_factory=AmbiguousRetryConfig)
     duplicate_order_protection: bool = True
+    # D.5: how often the engine polls the broker for fill/order-state updates.
+    order_sync_interval_seconds: float = 1.0
 
 
 class SessionCloseoutConfig(_Section):
