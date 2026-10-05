@@ -111,6 +111,16 @@ class TradingEngine:
         self.coverage: dict = {}
         self.recovery: dict = self._recovery_state()
         self._recovering = False
+        self._readiness_signature: tuple | None = None
+        # Bar-stream statistics (observable metrics for soak/readiness reports).
+        self.market_stats: dict[str, int] = {
+            "bars_received": 0,
+            "bars_rejected": 0,
+            "bars_duplicate": 0,
+            "bars_out_of_order": 0,
+            "bar_gaps": 0,
+            "recoveries": 0,
+        }
 
         self.feature_engine = FeatureEngine(config.features)
         self.regime_engine = RegimeEngine(
@@ -324,6 +334,14 @@ class TradingEngine:
             critical=True,
         )
         self.health.register(
+            "bar_stream",
+            # bars.required is enforced here: if a canonical bar stream is
+            # required but none has been seen, the system is not healthy.
+            lambda: (self._last_bar_at is not None) or not self.config.market_data.bars.required,
+            detail="canonical 1m bar stream",
+            critical=True,
+        )
+        self.health.register(
             # Phase C: a history->live gap larger than the configured tolerance
             # makes the data untrustworthy for trading until it is re-warmed.
             "data_integrity",
@@ -527,19 +545,24 @@ class TradingEngine:
         """Validate a canonical 1-minute bar, detect gaps, and aggregate."""
         symbol = candle.symbol
         if symbol != self.symbol:
+            self.market_stats["bars_rejected"] += 1
             await self.bus.emit(EventType.BAR_REJECTED, payload={"reason": "unexpected_symbol"})
             return
         if candle.high < candle.low or candle.low <= 0 or candle.volume < 0:
+            self.market_stats["bars_rejected"] += 1
             await self.bus.emit(EventType.BAR_REJECTED, payload={"reason": "invalid_bar"})
             return
         last = self._last_update_at.get(f"{symbol}:bar")
         if last is not None and candle.timestamp == last:
+            self.market_stats["bars_duplicate"] += 1
             await self.bus.emit(EventType.BAR_DUPLICATE, payload={"timestamp": candle.timestamp.isoformat()})
             return
         if last is not None and candle.timestamp < last:
+            self.market_stats["bars_out_of_order"] += 1
             await self.bus.emit(EventType.BAR_OUT_OF_ORDER, payload={"timestamp": candle.timestamp.isoformat()})
             return
         self._last_update_at[f"{symbol}:bar"] = candle.timestamp
+        self.market_stats["bars_received"] += 1
 
         await self._detect_bar_gap(candle)
 
@@ -560,6 +583,7 @@ class TradingEngine:
         if missing <= 0:
             return  # normal 1-minute progression is NOT an outage
         allowed = self.config.market_data.bars.max_gap_candles
+        self.market_stats["bar_gaps"] += 1
         await self.bus.emit(
             EventType.BAR_GAP_DETECTED,
             payload={"expected": expected.isoformat(), "actual": candle.timestamp.isoformat(), "missing": missing},
@@ -1070,6 +1094,30 @@ class TradingEngine:
 
         Halt entries -> fetch missing historical bars -> repair candle history ->
         rebuild features -> rebuild regime -> verify -> restore readiness. A
+        websocket reconnect alone never restores readiness. Attempts are bounded
+        by the configured ``resync_max_attempts`` (never an unbounded loop).
+        """
+        attempts = max(1, self.config.market_data.bars.resync_max_attempts)
+        for attempt in range(1, attempts + 1):
+            self.recovery = self._recovery_state()
+            self.recovery.update(
+                {
+                    "state": "running",
+                    "reason": reason,
+                    "started_at": utcnow().isoformat(),
+                    "attempts": attempt,
+                }
+            )
+            if await self._resync_once(reason=reason, attempt=attempt):
+                self.market_stats["recoveries"] += 1
+                return True
+        return False
+
+    async def _resync_once(self, *, reason: str, attempt: int) -> bool:
+        """Event-driven recovery after a large live-data gap.
+
+        Halt entries -> fetch missing historical bars -> repair candle history ->
+        rebuild features -> rebuild regime -> verify -> restore readiness. A
         websocket reconnect alone never restores readiness.
         """
         if self._recovering:
@@ -1078,9 +1126,9 @@ class TradingEngine:
         self._data_gap_ok = False
         history = self.config.market_data.history
         bars_cfg = self.config.market_data.bars
-        self.recovery = self._recovery_state()
-        self.recovery.update({"state": "running", "reason": reason, "started_at": utcnow().isoformat()})
-        await self._warmup_event(EventType.RECOVERY_STARTED, "RECOVERY STARTED", reason=reason)
+        await self._warmup_event(
+            EventType.RECOVERY_STARTED, "RECOVERY STARTED", reason=reason, attempt=attempt
+        )
         try:
             step = timeframe_minutes(bars_cfg.timeframe)
             anchor = self._last_bar_at or self._last_historical_at or utcnow()
@@ -1186,9 +1234,14 @@ class TradingEngine:
 
         def _stream(last: datetime | None, threshold: float) -> dict:
             age = None if last is None else round((now - last).total_seconds(), 3)
+            # A negative age means the feed is dated in the FUTURE relative to the
+            # local clock. The accelerated mock clock does this by design; a real
+            # feed doing it would be a clock-skew anomaly, so it is reported.
+            skew = None if last is None else round((last - now).total_seconds(), 3)
             return {
                 "last_at": last.isoformat() if last else None,
                 "age_seconds": age,
+                "clock_skew_seconds": skew if (skew or 0) > 0 else 0.0,
                 "fresh": age is not None and age <= threshold,
                 "threshold_seconds": threshold,
             }
@@ -1198,6 +1251,19 @@ class TradingEngine:
             "quotes": _stream(self._last_quote_at, freshness.quote_threshold_seconds),
             "trades": _stream(self._last_trade_at, freshness.trade_threshold_seconds),
         }
+
+    async def _publish_readiness_change(self) -> None:
+        """Emit READINESS_CHANGED only when the aggregate readiness actually moves."""
+        readiness = self.readiness()
+        signature = tuple(sorted((key, str(value)) for key, value in readiness.items()))
+        if signature == self._readiness_signature:
+            return
+        self._readiness_signature = signature
+        logger.info(
+            "READINESS CHANGED",
+            extra={"structured": {"event": "READINESS_CHANGED", "component": "engine", **readiness}},
+        )
+        await self.bus.emit(EventType.READINESS_CHANGED, payload=readiness)
 
     def readiness(self) -> dict:
         """Aggregate readiness shown on the dashboard / API."""
@@ -1308,6 +1374,10 @@ class TradingEngine:
                 EventType.SIGNAL_REJECTED,
                 payload={"signal_id": signal.signal_id, "reason": reason},
             )
+            await self.bus.emit(
+                EventType.ENTRY_BLOCKED,
+                payload={"signal_id": signal.signal_id, "reason": reason, "checks": failed},
+            )
             return
 
         logger.info(
@@ -1404,6 +1474,10 @@ class TradingEngine:
                 },
                 correlation_id=signal.correlation_id,
                 session_id=signal.session_id,
+            )
+            await self.bus.emit(
+                EventType.ENTRY_BLOCKED,
+                payload={"signal_id": signal.signal_id, "reason": "execution_disabled"},
             )
             return
 
@@ -1902,6 +1976,7 @@ class TradingEngine:
 
         self.state.risk = self._risk_status(now)
         self.state.session = self.session.snapshot(now)
+        await self._publish_readiness_change()
 
     async def _update_data_health(self, now: datetime) -> None:
         age = self.store.data_age(self.symbol, now)

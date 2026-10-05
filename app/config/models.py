@@ -485,6 +485,35 @@ class StorageConfig(_Section):
     sqlite_path: str = "data/trading_agent.sqlite3"
     echo: bool = False
 
+class SoakConfig(_Section):
+    """Long-duration live-bar soak verification (never auto-enabled on startup)."""
+
+    enabled: bool = False
+    duration_minutes: float = 60.0
+    expected_bar_interval_seconds: float = 60.0
+    maximum_missing_bars: int = 3
+    fail_on_unexpected_state: bool = True
+
+
+class OutageConfig(_Section):
+    """Deterministic fault injection used by the outage/recovery harness."""
+
+    enabled: bool = False
+    scenario: Literal[
+        "none", "missing_bars", "delayed_bars", "duplicate_bars",
+        "out_of_order_bars", "disconnect", "stale_data",
+        "history_fetch_failure", "incomplete_recovery", "recovery_timeout",
+    ] = "none"
+    missing_bars: int = 10
+    delay_bars: int = 3
+    duplicate_bars: int = 2
+
+
+class TestingConfig(_Section):
+    soak: SoakConfig = Field(default_factory=SoakConfig)
+    outage: OutageConfig = Field(default_factory=OutageConfig)
+
+
 class AppConfig(_Section):
     """Root configuration object (everything from configs/config.yaml)."""
 
@@ -507,6 +536,7 @@ class AppConfig(_Section):
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    testing: TestingConfig = Field(default_factory=TestingConfig)
 
     @model_validator(mode="after")
     def _session_ordering(self) -> "AppConfig":

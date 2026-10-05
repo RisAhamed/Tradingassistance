@@ -291,3 +291,21 @@ storage:
   url: ""
   sqlite_path: data/trading_agent.sqlite3
   echo: false
+
+# Verification tooling. NEVER auto-enabled on normal startup; the harnesses
+# (scripts/soak_alpaca.py, scripts/outage_recovery.py) read these values.
+testing:
+  soak:
+    enabled: false
+    duration_minutes: 60
+    expected_bar_interval_seconds: 60
+    maximum_missing_bars: 3
+    fail_on_unexpected_state: true
+  outage:
+    enabled: false
+    scenario: none            # none|missing_bars|delayed_bars|duplicate_bars|
+                              # out_of_order_bars|disconnect|stale_data|
+                              # history_fetch_failure|incomplete_recovery|recovery_timeout
+    missing_bars: 10
+    delay_bars: 3
+    duplicate_bars: 2

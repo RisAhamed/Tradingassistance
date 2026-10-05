@@ -24,6 +24,8 @@ class EventType(str, Enum):
     LIVE_HANDOFF_STARTED = "LiveHandoffStarted"
     LIVE_HANDOFF_COMPLETED = "LiveHandoffCompleted"
     DATA_GAP = "DataGap"
+    READINESS_CHANGED = "ReadinessChanged"
+    ENTRY_BLOCKED = "EntryBlocked"
     BAR_STREAM_CONNECTED = "BarStreamConnected"
     BAR_STREAM_SUBSCRIBED = "BarStreamSubscribed"
     BAR_RECEIVED = "BarReceived"

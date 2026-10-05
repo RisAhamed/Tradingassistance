@@ -524,6 +524,23 @@ Leaving them unset keeps the safe offline defaults (`history.provider: none`).
 - **Mock parity** — the mock provider emits the same canonical bars, so the demo
   rehearses the production path.
 
+## Verification tooling (Phase C1)
+
+| Tool | Command | Purpose |
+| --- | --- | --- |
+| Readiness matrix | `scripts/readiness_report.py --out logs/readiness.json` | JSON + markdown readiness table |
+| Live soak | `scripts/soak_alpaca.py --minutes 60` | Counts bars/gaps/recovery/orders over a window |
+| Outage/recovery | `scripts/outage_recovery.py --scenario missing_bars` | Deterministic fault injection + recovery chain |
+
+All are configured under `testing:` in `configs/config.yaml` and are **never**
+enabled on normal startup. Fault injection happens locally — the Alpaca server is
+never manipulated.
+
+Known measured issue: `market_data.freshness.threshold_seconds` (30 s) and
+`risk.stale_market_data.maximum_age_seconds` (5 s) are **smaller than the 60 s bar
+cadence**, so a healthy bar stream still reads as stale between minute
+boundaries. Retune before enabling execution.
+
 ## Configuration — one source of truth
 
 Two layers, deliberately separated:
