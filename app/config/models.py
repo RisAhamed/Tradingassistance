@@ -382,7 +382,9 @@ class RiskConfig(_Section):
 
 class PositionSizingConfig(_Section):
     method: str = "risk_based"
-    risk_per_trade_percent: float = 0.5
+    # Deprecated compatibility field for direct programmatic construction.
+    # AppConfig uses risk.risk_per_trade_percent as the YAML authority.
+    risk_per_trade_percent: float | None = None
     minimum_quantity: float = 0.000001
     maximum_quantity: float = 100.0
     quantity_precision: int = 6
@@ -577,6 +579,7 @@ class SoakConfig(_Section):
     duration_minutes: float = 60.0
     expected_bar_interval_seconds: float = 60.0
     maximum_missing_bars: int = 3
+    required_live_timeframes: list[str] = Field(default_factory=lambda: ["1m", "5m", "15m"])
     fail_on_unexpected_state: bool = True
 
 
@@ -637,6 +640,12 @@ class AppConfig(_Section):
             raise ValueError("session.entry_cutoff must lie between session.start and session.end")
         if not (cutoff <= deadline <= end):
             raise ValueError("session.flatten_deadline must lie between entry_cutoff and end")
+        legacy_risk = self.position_sizing.risk_per_trade_percent
+        if legacy_risk is not None and legacy_risk != self.risk.risk_per_trade_percent:
+            raise ValueError(
+                "position_sizing.risk_per_trade_percent is deprecated and must match "
+                "risk.risk_per_trade_percent when supplied"
+            )
         return self
 
 

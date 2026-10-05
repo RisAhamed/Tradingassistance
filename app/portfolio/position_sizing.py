@@ -32,8 +32,11 @@ class SizingResult:
 
 
 class PositionSizer:
-    def __init__(self, config: PositionSizingConfig) -> None:
+    def __init__(self, config: PositionSizingConfig, *, risk_percent: float | None = None) -> None:
         self.config = config
+        self.risk_percent = risk_percent if risk_percent is not None else (
+            config.risk_per_trade_percent if config.risk_per_trade_percent is not None else 0.5
+        )
 
     def size(
         self,
@@ -51,12 +54,12 @@ class PositionSizer:
             return SizingResult(equity, 0.0, 0.0, 0.0, 0.0, 0.0, "invalid_stop_distance")
         if equity is None or not _finite_positive(equity):
             return SizingResult(equity if equity == equity else 0.0, 0.0, stop_distance, 0.0, 0.0, 0.0, "non_positive_equity")
-        if not _finite_nonnegative(self.config.risk_per_trade_percent):
+        if not _finite_nonnegative(self.risk_percent):
             return SizingResult(equity, 0.0, stop_distance, 0.0, 0.0, 0.0, "invalid_risk_percent")
         if signal.entry_reference is not None and not _finite_nonnegative(signal.entry_reference):
             return SizingResult(equity, 0.0, stop_distance, 0.0, 0.0, 0.0, "invalid_entry_reference")
 
-        risk_budget = equity * (self.config.risk_per_trade_percent / 100.0)
+        risk_budget = equity * (self.risk_percent / 100.0)
         if not _finite_nonnegative(risk_budget) or risk_budget <= 0:
             return SizingResult(equity, 0.0, stop_distance, 0.0, 0.0, 0.0, "invalid_risk_budget")
         raw_quantity = risk_budget / stop_distance

@@ -35,14 +35,15 @@ RISK -> POSITION SIZE -> OMS -> BROKER -> FILL -> POSITION -> P&L
 | Historical warm-up (1m bars) | **Verified live** — 626 bars → 51×15m / 151×5m / 626×1m candles |
 | Features + regime after restart | **Ready** (`features.ready=true`, regime `trending_bullish`) |
 | Live handoff | **Verified** — gap 4.02 candles, within tolerance, no duplicates |
-| Automated tests | **112 passing** (`pytest tests`) |
-| `scripts/demo_mock.py` (offline, deterministic) | **Passing** — signals → orders → trade → verified flat |
+| Automated tests | **220 passing** (`pytest tests -q`) |
+| `scripts/demo_mock.py` (offline, deterministic) | **Passing** — decision pipeline → execution blocked → zero orders → flat |
 | `python -m app.backtesting.run --length 600` (synthetic) | **Passing** — 35 signals, 26 entries |
 | FastAPI + SSE + dashboard | **Working**, with a prominent `EXECUTION: DISABLED` banner |
 | Order submission | **Blocked** while `execution.enabled: false` |
 | Alpaca *trading* client | **Never constructed** while execution is disabled |
 | Live execution | **Not implemented / not permitted** |
 | AI flatten permission | **Disabled by configuration** (`ai.permissions.allow_flatten: false`) |
+| Phase D.1.2 real-feed continuity | **Read-only validated** — live bar handoff and 1m continuation verified; longer soak evidence is report-driven |
 
 > The backtest/demo P&L is generated from synthetic data and only proves the
 > pipeline executes end-to-end. It is **not** evidence of strategy edge.
@@ -68,6 +69,35 @@ Copy-Item .env.example .env
 
 No API keys are required for the mock demo, the backtest, or the test suite.
 
+### Phase D.1.2 read-only validation
+
+Execution must remain disabled for all commands below. The real-data commands
+use Alpaca market data and force the trading broker to the in-memory mock; no
+Alpaca trading client is constructed.
+
+```powershell
+# Short acceptance: warm-up, websocket, live bars, handoff, freshness
+.\.venv\Scripts\python.exe scripts\acceptance_alpaca.py --seconds 120
+
+# Configurable soak with live-only candle metrics and JSON/Markdown reports
+.\.venv\Scripts\python.exe scripts\soak_alpaca.py --seconds 900 `
+  --report logs/reports/phase_d1_2_soak_900s.json
+```
+
+Soak artifacts are written under `logs/reports/`. The soak records historical
+and live candle counts separately for `1m`, `5m`, and `15m`, plus quotes,
+trades, bars, rejects, gaps, reconnects, recovery, freshness, handoff, orders,
+and position state. The configured required live timeframes are in
+`configs/config.yaml` under `testing.soak.required_live_timeframes`.
+
+Runtime logs default to `logs/trading-agent.log`, resolved relative to the
+repository root. Startup prints the resolved `LOG_DIRECTORY`. The dashboard is
+served at `http://127.0.0.1:8000/dashboard` and exposes `/api/handoff` for
+read-only history-to-live diagnostics.
+
+The application remains `trading.mode: paper` with `execution.enabled: false`.
+No paper orders are created or submitted during D.1.2 validation.
+
 ## How to run and test
 
 All commands are run from the repository root. On Windows use
@@ -81,7 +111,7 @@ All commands are run from the repository root. On Windows use
 
 - Config lives in `pyproject.toml` (`asyncio_mode = "auto"`, `testpaths = ["tests"]`).
 - No network/credentials needed — tests use the mock provider/broker and an
-  offline AI provider. Expect **112 passed**.
+  offline AI provider. Expect **220 passed** (the count grows with regression coverage).
 
 Coverage by file (the safety contract is executable here):
 
@@ -107,10 +137,9 @@ Coverage by file (the safety contract is executable here):
 .\.venv\Scripts\python.exe scripts\demo_mock.py
 ```
 
-Replays the scripted mock series against the mock broker, prints a JSON summary
-(`signals`, `orders`, `trades`, `realized_pnl`, `regime`, `health`, candle
-counts) and then performs a verified flatten. Exit code is 0 only if the
-position ends flat and health is not `error`.
+Replays the scripted mock series with execution disabled, prints a JSON summary,
+and asserts zero orders and a flat position. It never opens the execution gate
+or performs a flatten request.
 
 ### Backtest (synthetic, offline)
 

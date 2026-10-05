@@ -263,7 +263,22 @@ def create_router() -> APIRouter:
             "last_bar_at": engine._last_bar_at.isoformat() if engine._last_bar_at else None,
             "live_bar_count": engine._live_bar_count,
             "provider_rejected_count": getattr(engine.provider, "rejected_count", None),
+            "candles": {timeframe: len(engine.store.candles(engine.symbol, timeframe)) for timeframe in engine.timeframes},
             "recovery": engine.recovery,
+        }
+
+    @router.get("/api/logging")
+    async def logging_status(request: Request):
+        """Read-only resolved logging configuration for the dashboard."""
+        runtime = _runtime(request)
+        configured = Path(runtime.config.logging.file.path)
+        resolved = configured if configured.is_absolute() else PROJECT_ROOT / configured
+        return {
+            "level": runtime.config.logging.level,
+            "console_enabled": runtime.config.logging.console.enabled,
+            "file_enabled": runtime.config.logging.file.enabled,
+            "path": str(resolved.resolve()),
+            "rotation": runtime.config.logging.rotation.model_dump(mode="json"),
         }
 
     @router.get("/api/decision-trace")

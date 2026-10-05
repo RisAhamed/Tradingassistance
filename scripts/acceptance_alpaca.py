@@ -61,6 +61,9 @@ WATCHED = [
     EventType.ALPACA_RECONNECT_FAILED,
     EventType.CANDLE_STARTED,
     EventType.CANDLE_COMPLETED,
+    EventType.QUOTE_RECEIVED,
+    EventType.TRADE_RECEIVED,
+    EventType.BAR_RECEIVED,
     EventType.FEATURES_UPDATED,
     EventType.REGIME_CHANGED,
     EventType.SIGNAL_GENERATED,
@@ -174,7 +177,7 @@ async def run(seconds: int) -> int:
             "features_missing": features.missing if features else None,
             "regime": regime.regime.value if regime else None,
             "regime_reason": regime.reason if regime else "not classified yet (warm-up)",
-            "warmup": {
+            "warmup_context": {
                 "context_timeframe": context_tf,
                 "context_candles": context_have,
                 "context_candles_required": context_need,

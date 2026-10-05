@@ -13,6 +13,7 @@ import json
 import sys
 import time
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -35,7 +36,7 @@ MEASURED = (
 )
 
 
-async def run(minutes: float | None) -> int:
+async def run(minutes: float | None, seconds: float | None, report_path: str | None) -> int:
     env = get_env()
     config = load_config(env=env)
     config.market_data.provider = "alpaca"
@@ -46,7 +47,9 @@ async def run(minutes: float | None) -> int:
     config.market_data.history.provider = "alpaca"
     config.market_data.history.required = True
     soak = config.testing.soak
-    minutes = minutes if minutes is not None else soak.duration_minutes
+    duration_seconds = seconds if seconds is not None else (
+        minutes * 60.0 if minutes is not None else soak.duration_minutes * 60.0
+    )
     configure_logging(config, env, project_root=PROJECT_ROOT)
 
     runtime = build_runtime(config, env)
@@ -59,22 +62,60 @@ async def run(minutes: float | None) -> int:
     engine.bus.subscribe_all(lambda event: extra.update([event.type.value]))
 
     print("\n=== PHASE C1 SOAK (execution DISABLED, read-only) ===")
-    print(f"symbol={config.trading.symbol} minutes={minutes} bars={config.market_data.bars.timeframe}")
+    log_path = PROJECT_ROOT / config.logging.file.path
+    print(f"symbol={config.trading.symbol} seconds={duration_seconds} bars={config.market_data.bars.timeframe}")
+    print(f"LOG_DIRECTORY = {log_path.parent.resolve()}")
+    print(f"EXECUTION_ENABLED = {engine.execution_enabled}")
 
     await runtime.startup()
+    collector.mark_live_baseline(engine)
     started = time.monotonic()
     try:
-        await asyncio.sleep(minutes * 60)
+        await asyncio.sleep(duration_seconds)
+        duration = time.monotonic() - started
+        result = collector.verify(
+            config=config,
+            engine=engine,
+            duration_seconds=duration,
+            execution_disabled=True,
+        )
+        matrix = build_readiness_matrix(engine)
     finally:
         await runtime.shutdown()
-
-    result = collector.verify(
-        config=config,
-        engine=engine,
-        duration_seconds=time.monotonic() - started,
-        execution_disabled=True,
+    report = {
+        "source": "REAL_ALPACA",
+        "phase": "D.1.2",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.monotonic() - started, 2),
+        "execution_enabled": engine.execution_enabled,
+        "orders_created": len(engine.oms.all_orders()),
+        "orders_submitted": collector.get(EventType.ORDER_SUBMITTED),
+        "position": "flat" if engine.position_manager.is_flat else "open",
+        "result": result.as_dict(),
+        "readiness": matrix,
+        "handoff": engine.warmup_status(),
+        "streams": engine.stream_state(),
+        "recovery": dict(engine.recovery),
+        "provider_rejected_count": getattr(engine.provider, "rejected_count", None),
+        "candles_total": {tf: len(engine.store.candles(engine.symbol, tf)) for tf in engine.timeframes},
+        "live_candles": result.live_candles,
+    }
+    output_path = Path(report_path) if report_path else PROJECT_ROOT / "logs" / "reports" / "phase_d1_2_soak.json"
+    if not output_path.is_absolute():
+        output_path = PROJECT_ROOT / output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8")
+    markdown_path = output_path.with_suffix(".md")
+    markdown_path.write_text(
+        "# Phase D.1.2 Real Alpaca Soak\n\n"
+        f"- Source: `{report['source']}`\n- Duration: `{report['duration_seconds']}s`\n"
+        f"- Execution enabled: `{report['execution_enabled']}`\n"
+        f"- Orders created/submitted: `{report['orders_created']}/{report['orders_submitted']}`\n"
+        f"- Position: `{report['position']}`\n\n"
+        "## Result\n\n```json\n" + json.dumps(result.as_dict(), indent=2, default=str) + "\n```\n\n"
+        "## Readiness\n\n" + render_markdown(matrix) + "\n",
+        encoding="utf-8",
     )
-    matrix = build_readiness_matrix(engine)
 
     print("\n--- MEASURED COUNTS ---")
     for event in MEASURED:
@@ -92,6 +133,11 @@ async def run(minutes: float | None) -> int:
         "bar_status": engine.stream_state()["bars"],
         "regime": engine.readiness()["regime"],
         "readiness": engine.readiness(),
+        "live_candles": result.live_candles,
+        "reconnects": result.reconnects,
+        "recovery_events": result.recovery_events,
+        "report_json": str(output_path),
+        "report_markdown": str(markdown_path),
     }, indent=2, default=str))
 
     ok = result.passed and not matrix["failed"]
@@ -102,8 +148,12 @@ async def run(minutes: float | None) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase C1 live bar soak test")
     parser.add_argument("--minutes", type=float, default=None, help="override testing.soak.duration_minutes")
+    parser.add_argument("--seconds", type=float, default=None, help="override soak duration in seconds")
+    parser.add_argument("--report", type=str, default=None, help="JSON report path, relative to the repository by default")
     args = parser.parse_args()
-    raise SystemExit(asyncio.run(run(args.minutes)))
+    if args.minutes is not None and args.seconds is not None:
+        parser.error("use either --minutes or --seconds, not both")
+    raise SystemExit(asyncio.run(run(args.minutes, args.seconds, args.report)))
 
 
 if __name__ == "__main__":

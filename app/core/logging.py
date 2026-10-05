@@ -113,6 +113,11 @@ def configure_logging(
     JsonFormatter.set_secrets(secrets)
     ConsoleFormatter.set_secrets(secrets)
 
+    log_path = Path(logging_config.file.path)
+    if project_root and not log_path.is_absolute():
+        log_path = project_root / log_path
+    print(f"LOG_DIRECTORY = {log_path.parent.resolve()}")
+
     if _CONFIGURED:
         return
 
@@ -129,9 +134,6 @@ def configure_logging(
         root.addHandler(console)
 
     if logging_config.file.enabled:
-        log_path = Path(logging_config.file.path)
-        if project_root and not log_path.is_absolute():
-            log_path = project_root / log_path
         log_path.parent.mkdir(parents=True, exist_ok=True)
         if logging_config.rotation.enabled:
             file_handler: logging.Handler = logging.handlers.RotatingFileHandler(

@@ -64,6 +64,9 @@ class SoakResult:
     duration_seconds: float
     counts: dict[str, int] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
+    live_candles: dict[str, int] = field(default_factory=dict)
+    reconnects: int = 0
+    recovery_events: dict[str, int] = field(default_factory=dict)
     passed: bool = True
 
     def as_dict(self) -> dict[str, Any]:
@@ -71,6 +74,9 @@ class SoakResult:
             "duration_seconds": round(self.duration_seconds, 2),
             "counts": dict(sorted(self.counts.items())),
             "failures": list(self.failures),
+            "live_candles": dict(sorted(self.live_candles.items())),
+            "reconnects": self.reconnects,
+            "recovery_events": dict(sorted(self.recovery_events.items())),
             "passed": self.passed,
         }
 
@@ -82,11 +88,18 @@ class SoakCollector:
         self.counts: dict[str, int] = {}
         self.other = 0  # informational events outside the tracked set
         self._handler = None
+        self._live_baseline: dict[str, int] | None = None
+        self._candle_event_counts: dict[str, int] = {}
+        self._candle_event_baseline: dict[str, int] = {}
 
     def attach(self, bus) -> None:
         def _handler(event) -> None:
             name = event.type.value
             self.counts[name] = self.counts.get(name, 0) + 1
+            if event.type is EventType.CANDLE_COMPLETED:
+                timeframe = event.payload.get("timeframe")
+                if timeframe:
+                    self._candle_event_counts[timeframe] = self._candle_event_counts.get(timeframe, 0) + 1
             if name not in TRACKED_EVENT_NAMES:
                 self.other += 1
 
@@ -100,6 +113,28 @@ class SoakCollector:
 
     def get(self, event_type: EventType) -> int:
         return self.counts.get(event_type.value, 0)
+
+    def mark_live_baseline(self, engine) -> None:
+        """Snapshot candle counts after warm-up so later counts are live-only."""
+        self._live_baseline = {
+            timeframe: len(engine.store.candles(engine.symbol, timeframe))
+            for timeframe in engine.timeframes
+        }
+        self._candle_event_baseline = dict(self._candle_event_counts)
+
+    def live_candles(self, engine) -> dict[str, int]:
+        baseline = self._live_baseline or {}
+        live: dict[str, int] = {}
+        for timeframe in engine.timeframes:
+            if timeframe == engine.config.market_data.bars.timeframe:
+                live[timeframe] = engine._live_bar_count
+            else:
+                live[timeframe] = max(
+                    0,
+                    self._candle_event_counts.get(timeframe, 0)
+                    - self._candle_event_baseline.get(timeframe, 0),
+                )
+        return live
 
     def verify(
         self,
@@ -135,10 +170,22 @@ class SoakCollector:
         if not engine.position_manager.is_flat:
             failures.append("position is not flat while execution is disabled")
 
+        live_candles = self.live_candles(engine)
+        if self._live_baseline is not None:
+            for timeframe in soak.required_live_timeframes:
+                if live_candles.get(timeframe, 0) <= 0:
+                    failures.append(f"no live completed candles for {timeframe}")
+
         return SoakResult(
             duration_seconds=duration_seconds,
             counts=dict(self.counts),
             failures=failures,
+            live_candles=live_candles,
+            reconnects=self.get(EventType.ALPACA_RECONNECTED),
+            recovery_events={
+                event.value: self.get(event)
+                for event in (EventType.RECOVERY_STARTED, EventType.RECOVERY_COMPLETED, EventType.RECOVERY_FAILED)
+            },
             passed=not failures,
         )
 
@@ -182,7 +229,8 @@ def build_readiness_matrix(engine) -> dict[str, Any]:
     add("Regime classified", bool(readiness["regime_ready"]), f"regime={readiness['regime']}")
     add("Strategy ready", bool(readiness["strategy_ready"]), f"ready={readiness['strategy_ready']}")
     add("Data integrity", bool(readiness["data_integrity_ok"]), f"ok={readiness['data_integrity_ok']}")
-    add("Recovery state", True, f"state={readiness['recovery_state']}")
+    recovery_ok = readiness["recovery_state"] in ("idle", "completed")
+    add("Recovery state", recovery_ok, f"state={readiness['recovery_state']}", blocking=not recovery_ok)
     add("Execution disabled", not execution_enabled, f"execution={readiness['execution']}")
     add("Zero orders", not engine.oms.all_orders(), f"orders={len(engine.oms.all_orders())}")
     add("Position flat", engine.position_manager.is_flat, f"flat={engine.position_manager.is_flat}")

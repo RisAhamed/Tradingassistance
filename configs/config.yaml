@@ -192,7 +192,6 @@ risk:
 
 position_sizing:
   method: risk_based
-  risk_per_trade_percent: 0.5
   minimum_quantity: 0.000001
   maximum_quantity: 100.0
   quantity_precision: 6
@@ -324,6 +323,7 @@ testing:
     duration_minutes: 60
     expected_bar_interval_seconds: 60
     maximum_missing_bars: 3
+    required_live_timeframes: ["1m", "5m", "15m"]
     fail_on_unexpected_state: true
   outage:
     enabled: false

@@ -1,9 +1,11 @@
 """Phase A #11 (config source of truth), #12 (event logging), #13 (dashboard)."""
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config.loader import PROJECT_ROOT, get_env, load_config, sanitized_config
+from app.config.models import AppConfig
 from app.events.types import EventType
 from app.main import create_app
 from app.runtime import build_runtime
@@ -45,6 +47,14 @@ def test_tunables_come_from_config():
     assert config.ai.provider  # provider is configurable, not hardcoded
     # Ambiguous submissions are reconciled, never blindly retried (Phase A).
     assert config.execution.retry.action == "reconcile"
+    assert config.position_sizing.risk_per_trade_percent is None
+
+
+def test_conflicting_legacy_position_risk_is_rejected():
+    config = load_config(env=get_env()).model_dump()
+    config["position_sizing"]["risk_per_trade_percent"] = 1.0
+    with pytest.raises(ValueError, match="must match"):
+        AppConfig.model_validate(config)
 
 
 def test_sanitized_config_excludes_secret_values():
@@ -63,7 +73,7 @@ def test_dashboard_shows_all_required_panels():
     assert "P&amp;L" in html
     for element_id in ("health", "session", "system", "market", "features", "regime", "strategy", "risk", "position", "pnl", "orders", "ai", "stream"):
         assert f'id="{element_id}"' in html, f"dashboard missing {element_id} element"
-    for element_id in ("handoff", "freshness-state", "decision-trace"):
+    for element_id in ("handoff", "candles", "recovery", "logging", "freshness-state", "decision-trace"):
         assert f'id="{element_id}"' in html, f"dashboard missing {element_id} element"
 
 
@@ -74,6 +84,9 @@ def test_handoff_endpoint_is_read_only_and_exposes_live_watermark():
         payload = response.json()
         assert payload["live_bar_count"] == 0
         assert "warmup" in payload
+        assert "candles" in payload
+        logging_payload = client.get("/api/logging").json()
+        assert logging_payload["path"].endswith("logs\\trading-agent.log") or logging_payload["path"].endswith("logs/trading-agent.log")
 
 
 # --- #12 critical event logging --------------------------------------------

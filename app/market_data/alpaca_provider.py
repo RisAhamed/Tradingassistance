@@ -197,6 +197,7 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         await self._emit(
             EventType.QUOTE_RECEIVED,
             "QUOTE_RECEIVED",
+            level=logging.DEBUG,
             symbol=symbol,
             timestamp=quote.timestamp.isoformat(),
             bid=quote.bid,
@@ -222,6 +223,7 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         await self._emit(
             EventType.TRADE_RECEIVED,
             "TRADE_RECEIVED",
+            level=logging.DEBUG,
             symbol=symbol,
             timestamp=trade.timestamp.isoformat(),
             price=trade.price,

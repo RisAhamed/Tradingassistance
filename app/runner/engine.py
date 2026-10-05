@@ -139,7 +139,10 @@ class TradingEngine:
             allow_short=config.execution.allow_short,
             cooldown_minutes=config.strategy.cooldown.minutes if config.strategy.cooldown.enabled else 0.0,
         )
-        self.sizer = PositionSizer(config.position_sizing)
+        self.sizer = PositionSizer(
+            config.position_sizing,
+            risk_percent=config.risk.risk_per_trade_percent,
+        )
         self.oms = OMS(self.broker, duplicate_protection=config.execution.duplicate_order_protection)
         self.executor = OrderExecutor(self.oms)
         self.position_manager = PositionManager(self.symbol)
@@ -1708,7 +1711,7 @@ class TradingEngine:
             correlation_id=signal.correlation_id,
             session_id=signal.session_id,
             sizing=sizing,
-            risk_percent=self.config.position_sizing.risk_per_trade_percent,
+            risk_percent=self.config.risk.risk_per_trade_percent,
             maximum_notional=max_notional if max_notional > 0 else None,
         )
         # Phase D.1: supersede any previously ACTIVE plan (a new plan replaces

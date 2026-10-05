@@ -49,14 +49,17 @@ async def test_soak_collector_counts_and_passes_on_a_clean_run():
     engine = _engine()
     collector = SoakCollector()
     collector.attach(engine.bus)
-    for i in range(1, 6):
+    collector.mark_live_baseline(engine)
+    engine.config.testing.soak.required_live_timeframes = []
+    for i in range(1, 7):
         await engine.on_market_update(_bar(i))
     result = collector.verify(
         config=engine.config, engine=engine, duration_seconds=5.0, execution_disabled=True
     )
     assert result.passed, result.failures
     assert collector.get(EventType.BAR_DUPLICATE) == 0
-    assert engine.market_stats["bars_received"] == 5
+    assert engine.market_stats["bars_received"] == 6
+    assert result.live_candles["5m"] >= 1
 
 
 async def test_soak_fails_when_gaps_exceed_tolerance():
