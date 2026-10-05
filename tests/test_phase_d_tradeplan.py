@@ -64,7 +64,7 @@ def test_build_creates_ready_plan(builder):
     signal = _signal()
     result = builder.build_from_signal(signal, regime=_regime(), features=_features(), snapshot=None)
     plan = result.plan
-    assert plan.status == TradePlanStatus.READY
+    assert plan.status == TradePlanStatus.ACTIVE
     assert plan.direction == Direction.LONG
     assert plan.stop_price is not None
     assert plan.target_price is not None

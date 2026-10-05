@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any
 
 from app.config.models import TimeframeSelectionConfig
+from app.core.clock import utcnow
 from app.domain.features import FeatureSnapshot
 from app.domain.regime import RegimeSnapshot
 
@@ -56,7 +57,7 @@ class TimeframeSelector:
         now: datetime | None = None,
         correlation_id: str | None = None,
     ) -> TimeframeSelection:
-        now = now or datetime.utcnow()
+        now = now or utcnow()
         reason_parts: list[str] = []
         blocked = False
 

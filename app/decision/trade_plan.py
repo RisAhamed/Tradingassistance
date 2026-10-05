@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from app.config.models import TradePlanConfig
+from app.core.clock import utcnow
 from app.core.ids import new_order_id
 from app.domain.enums import Direction
 from app.domain.trade_plan import TradePlan, TradePlanStatus
@@ -35,7 +36,7 @@ class TradePlanBuilder:
         correlation_id: str | None = None,
         session_id: str | None = None,
     ) -> TradePlanBuildResult:
-        now = datetime.utcnow()
+        now = utcnow()
         events: list[dict[str, Any]] = []
         entry_conditions = self._entry_conditions(
             signal=signal, regime=regime, features=features,
@@ -49,13 +50,14 @@ class TradePlanBuilder:
             distance = abs(signal.entry_reference - stop_price)
             if distance > 0:
                 position_quantity = risk_amount / distance
-        expected_holding = self.config.default_expected_holding_minutes
+        expected_holding = self._expected_holding(regime, features)
+        maximum_holding = self.config.maximum_holding_minutes
         maximum_holding = self.config.maximum_holding_minutes
         invalidation = self._invalidation_conditions(regime=regime, features=features, snapshot=snapshot)
         if not entry_ready or signal.direction is None:
             status = TradePlanStatus.WAIT
         else:
-            status = TradePlanStatus.READY
+            status = TradePlanStatus.ACTIVE
         reasons = [signal.reason] if signal.reason else []
         plan = TradePlan(
             plan_id=new_order_id(),
@@ -82,14 +84,52 @@ class TradePlanBuilder:
             status=status,
             correlation_id=correlation_id,
             session_id=session_id,
+            # Phase D.1: persist the market context + provenance so the
+            # decision can be reconstructed after a restart.
+            extra={
+                "volatility": features.volatility,
+                "spread_percent": features.spread_percent,
+                "volume_ratio": features.volume_ratio,
+                "atr": features.atr,
+                "strategy_version": getattr(signal, "strategy_version", None),
+                "source_signal_id": getattr(signal, "signal_id", None),
+            },
         )
-        events.append({"event": "TRADE_PLAN_CREATED" if status == TradePlanStatus.READY else "TRADE_PLAN_UPDATED", "plan_id": plan.plan_id, "status": status.value, "entry_ready": entry_ready})
+        events.append({"event": "TRADE_PLAN_CREATED" if status == TradePlanStatus.ACTIVE else "TRADE_PLAN_UPDATED", "plan_id": plan.plan_id, "status": status.value, "entry_ready": entry_ready})
         return TradePlanBuildResult(plan=plan, events=events)
 
     def invalidate(self, plan: TradePlan, *, reason: str, now: datetime | None = None) -> TradePlanBuildResult:
-        now = now or datetime.utcnow()
-        updated = TradePlan(**{**plan.model_dump(), "status": TradePlanStatus.INVALIDATED, "timestamp": now, "reasons": plan.reasons + [f"invalidated:{reason}"]})
+        now = now or utcnow()
+        # Preserve the *incoming* status so transition_to records the real
+        # previous_status. Building with status=INVALIDATED first (a bug fixed
+        # here) made previous_status report "invalidated" -> "invalidated".
+        incoming = plan.status
+        updated = TradePlan(**{
+            **plan.model_dump(),
+            "status": incoming,
+            "timestamp": now,
+            "reasons": plan.reasons + [f"invalidated:{reason}"],
+        })
+        updated.invalidation_reason = reason
+        updated.transition_to(TradePlanStatus.INVALIDATED, reason=reason, trigger="AUTOMATIC", source_event="INVALIDATION_CONDITION")
         return TradePlanBuildResult(plan=updated, events=[{"event": "TRADE_PLAN_INVALIDATED", "reason": reason}])
+
+    def reactivate(self, plan: TradePlan, *, reason: str = "", now: datetime | None = None) -> TradePlanBuildResult:
+        """Reactivate a WAIT plan when conditions improve."""
+        now = now or utcnow()
+        # Preserve the incoming status so previous_status is recorded truthfully.
+        incoming = plan.status
+        updated = TradePlan(**{**plan.model_dump(), "status": incoming, "timestamp": now})
+        updated.transition_to(TradePlanStatus.ACTIVE, reason=reason or "conditions_improved", trigger="REACTIVATION", source_event="MARKET_UPDATE")
+        return TradePlanBuildResult(plan=updated, events=[{"event": "TRADE_PLAN_UPDATED", "plan_id": updated.plan_id, "status": updated.status.value}])
+
+    def _expected_holding(self, regime, features) -> float:
+        base = self.config.default_expected_holding_minutes
+        if regime.is_trending and not regime.is_unknown:
+            return base * 1.5
+        if features and features.volatility is not None and features.volatility > 0.02:
+            return base * 0.5
+        return base
 
     def _entry_conditions(self, *, signal, regime, features, snapshot, freshness_stale):
         return [

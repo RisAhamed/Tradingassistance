@@ -247,6 +247,8 @@ class TradePlanConfig(_Section):
     target_atr_multiplier: float = 3.0
     default_expected_holding_minutes: float = 30.0
     maximum_holding_minutes: float = 240.0
+    # Phase D.1: decision-trace ring-buffer size.
+    decision_trace_max_stages: int = 64
 
 
 class TimeframesConfig(_Section):

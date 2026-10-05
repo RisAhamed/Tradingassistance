@@ -42,7 +42,7 @@ from app.events.bus import EventBus
 from app.decision.freshness import FreshnessPolicy
 from app.decision.selector import TimeframeSelector, TimeframeSelection
 from app.decision.trade_plan import TradePlanBuilder
-from app.domain.trade_plan import TradePlan
+from app.domain.trade_plan import TradePlan, TradePlanStatus
 from app.events.types import EventType
 from app.execution.executor import ExecutionResult, OrderExecutor
 from app.features.engine import FeatureEngine
@@ -181,6 +181,114 @@ class TradingEngine:
         self._timeframe_selection: TimeframeSelection | None = None
         self._trade_plan: TradePlan | None = None
         self._last_freshness: dict[str, object] | None = None
+        # Phase D.1: decision trace (per-cycle reconstructable record).
+        self._decision_trace: list[dict] = []
+        self._trade_plan_history: list[TradePlan] = []
+
+    # -- Phase D.1: decision trace ------------------------------------------
+    def _trace(self, stage: str, status: str, *, decision: str = "", reason: str = "",
+               inputs: dict | None = None, output: dict | None = None) -> dict:
+        """Append one decision-trace stage. Bounded ring buffer."""
+        entry = {
+            "stage": stage,
+            "status": status,
+            "decision": decision,
+            "reason": reason,
+            "inputs": inputs or {},
+            "output": output or {},
+            "timestamp": utcnow().isoformat(),
+        }
+        self._decision_trace.append(entry)
+        if len(self._decision_trace) > self.config.trade_plan.decision_trace_max_stages:
+            del self._decision_trace[: len(self._decision_trace) - self.config.trade_plan.decision_trace_max_stages]
+        return entry
+
+    def decision_trace(self) -> list[dict]:
+        """Return the current decision-cycle trace (most recent last)."""
+        return list(self._decision_trace)
+
+    def _reset_trace(self) -> None:
+        self._decision_trace = []
+
+    # -- Phase D.1: TradePlan validity --------------------------------------
+    def trade_plan_invalidity(self, plan: TradePlan | None, now: datetime) -> str | None:
+        """Return an invalidation reason for `plan`, or None when still valid.
+
+        Checks the conditions that made the plan valid; every check reads the
+        SAME authoritative state used by the decision pipeline (freshness
+        policy, data-integrity flag, session state, position state).
+        """
+        if plan is None or plan.status not in (TradePlanStatus.ACTIVE, TradePlanStatus.READY):
+            return None
+        fp = self.freshness_policy
+        bar_expected = timeframe_minutes(self.config.market_data.bars.timeframe) * 60
+        bar = fp.evaluate(
+            source="bar", last_received=self._last_bar_at, now=now,
+            expected_interval_seconds=bar_expected,
+        )
+        if bar.is_stale and fp.stale_action() == "block_entries":
+            return "STALE_MARKET_DATA"
+        if not self._data_gap_ok:
+            return "DATA_INTEGRITY_FAILURE"
+        if self.state.regime is not None and plan.regime != self.state.regime.regime:
+            return "REGIME_CHANGED"
+        if self._timeframe_selection is not None and self._timeframe_selection.blocked:
+            return "TIMEFRAME_SELECTION_BLOCKED"
+        if not self.session.entries_allowed:
+            return "SESSION_ENTRIES_CLOSED"
+        if self._need_reconciliation:
+            return "RECONCILIATION_FAILURE"
+        snap = self.state.latest_snapshot
+        limit = self.config.timeframes.selection.spread_max_percent
+        if snap is not None and snap.spread_percent is not None and snap.spread_percent > limit:
+            return "SPREAD_UNACCEPTABLE"
+        min_ratio = self.config.timeframes.selection.liquidity_min_volume_ratio
+        feats = self.state.features
+        if feats is not None and feats.volume_ratio is not None and feats.volume_ratio < min_ratio:
+            return "LIQUIDITY_UNACCEPTABLE"
+        if not self.health.ready():
+            return "SYSTEM_UNHEALTHY"
+        if plan.timestamp is not None:
+            held = (now - plan.timestamp).total_seconds() / 60.0
+            if held > plan.maximum_holding_minutes:
+                return "MAXIMUM_HOLDING_EXCEEDED"
+        return None
+
+    async def _invalidate_trade_plan_if_needed(self, now: datetime) -> None:
+        """Invalidate the active TradePlan when its premises no longer hold."""
+        reason = self.trade_plan_invalidity(self._trade_plan, now)
+        if reason is None:
+            return
+        plan = self._trade_plan
+        result = self.trade_plan_builder.invalidate(plan, reason=reason, now=now)
+        self._trade_plan = result.plan
+        self._trade_plan_history.append(result.plan)
+        logger.warning(
+            "TRADE_PLAN_INVALIDATED",
+            extra={"structured": {
+                "event": "TRADE_PLAN_INVALIDATED", "component": "engine",
+                "plan_id": result.plan.plan_id, "symbol": result.plan.symbol,
+                "previous_status": plan.status.value, "new_status": result.plan.status.value,
+                "reason": reason,
+                "action": "BLOCK_FURTHER_EXECUTION",
+            }},
+        )
+        self._trace("TRADEPLAN", "REJECTED", decision="INVALIDATE", reason=reason,
+                    output={"plan_id": result.plan.plan_id, "status": result.plan.status.value})
+        if self.repository is not None:
+            await self.repository.save_trade_plan(
+                result.plan.model_dump(mode="json"), session_id=result.plan.session_id
+            )
+        await self.bus.emit(
+            EventType.TRADE_PLAN_INVALIDATED,
+            payload={
+                "plan_id": result.plan.plan_id, "symbol": result.plan.symbol,
+                "previous_status": plan.status.value, "new_status": result.plan.status.value,
+                "reason": reason, "action": "BLOCK_FURTHER_EXECUTION",
+            },
+            correlation_id=result.plan.correlation_id,
+            session_id=result.plan.session_id,
+        )
 
     # -- component wiring ---------------------------------------------------
     @property
@@ -708,11 +816,52 @@ class TradingEngine:
     async def evaluate(self, now: datetime | None = None) -> StrategySignal | None:
         """Run features -> regime -> strategy for the signal timeframe."""
         now = now or utcnow()
+        logger.info(
+            "DECISION_CYCLE_STARTED",
+            extra={"structured": {"event": "DECISION_CYCLE_STARTED", "component": "engine", "symbol": self.symbol}},
+        )
+        self._reset_trace()
+        self._trace("DECISION_CYCLE", "PASS", decision="START", reason="signal_candle_closed",
+                    inputs={"symbol": self.symbol, "now": now.isoformat()})
         # Phase D: cadence-aware freshness evaluation (every evaluation cycle)
         fp = self.freshness_policy
         bar_expected = timeframe_minutes(self.config.market_data.bars.timeframe) * 60
         bar_fresh = fp.evaluate(source="bar", last_received=self._last_bar_at, now=now, expected_interval_seconds=bar_expected)
         await self._emit_freshness(now, {"bar": bar_fresh})
+        logger.info(
+            "FRESHNESS",
+            extra={
+                "structured": {
+                    "event": "FRESHNESS",
+                    "component": "freshness",
+                    "age_seconds": bar_fresh.age_seconds,
+                    "effective_threshold_seconds": bar_fresh.effective_threshold_seconds,
+                    "is_stale": bar_fresh.is_stale,
+                    "reason": bar_fresh.reason,
+                    "clock_state": "FUTURE_TIMESTAMP" if bar_fresh.future_timestamp else ("CLOCK_SKEW" if bar_fresh.clock_skew_seconds > 0 else ("STALE" if bar_fresh.is_stale else "NORMAL")),
+                }
+            },
+        )
+        self._trace(
+            "FRESHNESS", "BLOCKED" if bar_fresh.is_stale else "PASS",
+            decision="STALE" if bar_fresh.is_stale else "FRESH",
+            reason=bar_fresh.reason,
+            inputs={
+                "latest_market_timestamp": self._last_bar_at.isoformat() if self._last_bar_at else None,
+                "current_timestamp": now.isoformat(),
+            },
+            output={
+                "observed_age_seconds": bar_fresh.age_seconds,
+                "measurement_threshold": bar_fresh.effective_threshold_seconds,
+                "risk_threshold": bar_fresh.effective_threshold_seconds,
+                "risk_state": "BLOCK" if bar_fresh.is_stale else "ALLOW",
+                "clock_state": ("FUTURE_TIMESTAMP" if bar_fresh.future_timestamp
+                                else "CLOCK_SKEW" if bar_fresh.clock_skew_seconds > 0
+                                else "STALE" if bar_fresh.is_stale else "NORMAL"),
+            },
+        )
+        # Phase D.1: re-check the active plan for the CURRENT market state.
+        await self._invalidate_trade_plan_if_needed(now)
         # Phase D: dynamic timeframe selection
         regime_for_select = self.state.regime
         if regime_for_select is None:
@@ -725,12 +874,45 @@ class TradingEngine:
         )
         self._timeframe_selection = selection
         await self._emit_timeframe_selection(selection)
+        self._trace(
+            "TIMEFRAME_SELECTION", "BLOCKED" if selection.blocked else "PASS",
+            decision="BLOCK" if selection.blocked else "SELECT",
+            reason=selection.reason,
+            inputs=selection.inputs,
+            output={
+                "context": selection.context_timeframe,
+                "signal": selection.signal_timeframe,
+                "execution": selection.execution_timeframe,
+                "method": selection.method,
+            },
+        )
+        logger.info(
+            "TIMEFRAME_SELECTED",
+            extra={
+                "structured": {
+                    "event": "TIMEFRAME_SELECTED",
+                    "component": "engine",
+                    "context": selection.context_timeframe,
+                    "signal": selection.signal_timeframe,
+                    "execution": selection.execution_timeframe,
+                    "blocked": selection.blocked,
+                    "reason": selection.reason,
+                }
+            },
+        )
         # Use selected timeframes when available; fall back to config.
         signal_tf = selection.signal_timeframe if not selection.blocked else self.config.timeframes.signal
         context_tf = selection.context_timeframe if not selection.blocked else self.config.timeframes.context
         features = self._features_for(signal_tf, now)
         self.state.features = features
         self.state.last_evaluation_at = now
+        self._trace(
+            "FEATURES", "PASS" if features.ready else "WAIT",
+            decision="READY" if features.ready else "NOT_READY",
+            reason=",".join(features.missing) if features.missing else "all_present",
+            inputs={"timeframe": signal_tf},
+            output={"candle_count": features.candle_count, "ready": features.ready},
+        )
         logger.info(
             "FEATURES UPDATED",
             extra={
@@ -753,7 +935,23 @@ class TradingEngine:
         if regime is None:
             regime = self.regime_engine.classify(features, now=now)
             self.state.record_regime(regime)
-
+        logger.info(
+            "REGIME",
+            extra={
+                "structured": {
+                    "event": "REGIME_CHANGED",
+                    "component": "regime",
+                    "regime": regime.regime.value,
+                    "reason": regime.reason,
+                }
+            },
+        )
+        self._trace(
+            "REGIME", "PASS" if not regime.is_unknown else "WAIT",
+            decision=regime.regime.value.upper(),
+            reason=regime.reason,
+            output={"regime": regime.regime.value, "timeframe": context_tf},
+        )
         # REGIME SAFETY: report explicitly why evaluation cannot proceed.
         if regime.is_unknown:
             logger.info(
@@ -818,7 +1016,28 @@ class TradingEngine:
                 "NO_SIGNAL",
                 extra={"structured": {"event": "STRATEGY_EVALUATED", "component": "strategy", "result": "no_signal"}},
             )
+            self._trace("STRATEGY", "WAIT", decision="NO_SIGNAL", reason="no_setup",
+                        inputs={"strategy": self.config.strategy.name, "version": self.config.strategy.version})
+            self._trace("SIGNAL", "SKIPPED", decision="NONE", reason="no_signal")
+            self._trace("EXECUTION_GATE", "SKIPPED", decision="NO_ORDER",
+                        reason="no_signal",
+                        output={"status": self.execution_status()["status"],
+                                "execution": self.execution_status()["status"]})
             return None
+
+        self._trace(
+            "STRATEGY", "PASS", decision="SIGNAL", reason=signal.reason,
+            inputs={"strategy": signal.strategy, "timeframe": self.config.timeframes.signal},
+            output={"signal_id": signal.signal_id, "direction": signal.direction.value},
+        )
+        self._trace(
+            "SIGNAL", "PASS", decision=signal.direction.value.upper(), reason=signal.reason,
+            output={
+                "signal_id": signal.signal_id,
+                "entry_reference": signal.entry_reference,
+                "risk_distance": signal.risk_distance,
+            },
+        )
 
         logger.info(
             "SIGNAL GENERATED",
@@ -1260,28 +1479,62 @@ class TradingEngine:
         return not regime.is_unknown
 
     def stream_state(self, now: datetime | None = None) -> dict:
-        """Per-stream freshness — bars, quotes and trades reported separately."""
-        now = now or utcnow()
-        freshness = self.config.market_data.freshness
+        """Per-stream freshness — bars, quotes and trades reported separately.
 
-        def _stream(last: datetime | None, threshold: float) -> dict:
-            age = None if last is None else round((now - last).total_seconds(), 3)
-            # A negative age means the feed is dated in the FUTURE relative to the
-            # local clock. The accelerated mock clock does this by design; a real
-            # feed doing it would be a clock-skew anomaly, so it is reported.
-            skew = None if last is None else round((last - now).total_seconds(), 3)
+        Uses the SAME cadence-aware freshness policy as the risk gate
+        (_build_risk_context), so health/observability and risk decisions
+        are based on one authoritative freshness measurement.
+        """
+        now = now or utcnow()
+        fp = self.freshness_policy
+
+        def _stream(source: str, last: datetime | None) -> dict:
+            if last is None:
+                return {
+                    "last_at": None,
+                    "age_seconds": None,
+                    "clock_skew_seconds": 0.0,
+                    "fresh": False,
+                    "threshold_seconds": fp._threshold_for(source),
+                    "clock_state": "NO_DATA",
+                    "reason": "no_data",
+                }
+
+            result = fp.evaluate(
+                source=source,
+                last_received=last,
+                now=now,
+                expected_interval_seconds=(
+                    timeframe_minutes(self.config.market_data.bars.timeframe) * 60
+                    if source == "bar"
+                    else None
+                ),
+            )
+
+            # Determine explicit clock state
+            if result.future_timestamp:
+                clock_state = "FUTURE_TIMESTAMP"
+            elif result.clock_skew_seconds > 0:
+                clock_state = "CLOCK_SKEW"
+            elif result.is_stale:
+                clock_state = "STALE"
+            else:
+                clock_state = "NORMAL"
+
             return {
                 "last_at": last.isoformat() if last else None,
-                "age_seconds": age,
-                "clock_skew_seconds": skew if (skew or 0) > 0 else 0.0,
-                "fresh": age is not None and age <= threshold,
-                "threshold_seconds": threshold,
+                "age_seconds": result.age_seconds,
+                "clock_skew_seconds": result.clock_skew_seconds,
+                "fresh": not result.is_stale,
+                "threshold_seconds": result.effective_threshold_seconds,
+                "clock_state": clock_state,
+                "reason": result.reason,
             }
 
         return {
-            "bars": _stream(self._last_bar_at, freshness.threshold_seconds),
-            "quotes": _stream(self._last_quote_at, freshness.quote_threshold_seconds),
-            "trades": _stream(self._last_trade_at, freshness.trade_threshold_seconds),
+            "bars": _stream("bar", self._last_bar_at),
+            "quotes": _stream("quote", self._last_quote_at),
+            "trades": _stream("trade", self._last_trade_at),
         }
 
     async def _publish_readiness_change(self) -> None:
@@ -1369,6 +1622,16 @@ class TradingEngine:
         if self.repository is not None:
             await self.repository.save_risk_decision(decision)
 
+        self._trace(
+            "RISK", "PASS" if decision.approved else "REJECTED",
+            decision="APPROVED" if decision.approved else "REJECTED",
+            reason=decision.reason.value,
+            inputs={
+                "signal_id": signal.signal_id,
+                "failed_checks": [c.name for c in decision.failed_checks],
+            },
+            output={"risk_id": decision.risk_id, "approved": decision.approved},
+        )
         if not decision.approved:
             reason = decision.reason.value
             failed = [c.name for c in decision.failed_checks]
@@ -1432,11 +1695,51 @@ class TradingEngine:
             correlation_id=signal.correlation_id,
             session_id=signal.session_id,
         )
+        # Phase D.1: supersede any previously ACTIVE plan (a new plan replaces
+        # the old one; the old one is kept in history, never reused).
+        previous = self._trade_plan
+        if previous is not None and previous.status in (TradePlanStatus.ACTIVE, TradePlanStatus.READY):
+            self._trade_plan_history.append(previous)
         self._trade_plan = tp_result.plan
+        self._trace(
+            "TRADEPLAN", "PASS" if tp_result.plan.status == TradePlanStatus.ACTIVE else "WAIT",
+            decision="BUILD", reason=";".join(tp_result.plan.reasons),
+            inputs={"signal_id": signal.signal_id, "regime": str(self.state.regime.regime if self.state.regime else None)},
+            output={
+                "plan_id": tp_result.plan.plan_id, "status": tp_result.plan.status.value,
+                "direction": str(tp_result.plan.direction) if tp_result.plan.direction else None,
+                "stop_price": tp_result.plan.stop_price, "target_price": tp_result.plan.target_price,
+                "quantity": tp_result.plan.position_quantity, "risk_amount": tp_result.plan.risk_amount,
+            },
+        )
+        logger.info(
+            "TRADEPLAN",
+            extra={
+                "structured": {
+                    "event": "TRADE_PLAN_CREATED",
+                    "component": "engine",
+                    "plan_id": tp_result.plan.plan_id,
+                    "status": tp_result.plan.status.value,
+                    "direction": str(tp_result.plan.direction) if tp_result.plan.direction else None,
+                    "entry_reference": tp_result.plan.entry_reference,
+                    "stop_price": tp_result.plan.stop_price,
+                    "target_price": tp_result.plan.target_price,
+                    "risk_amount": tp_result.plan.risk_amount,
+                    "position_quantity": tp_result.plan.position_quantity,
+                    "entry_ready": all(c["met"] for c in tp_result.plan.entry_conditions),
+                }
+            },
+        )
+        # Phase D.1: persist TradePlan
+        if self.repository is not None:
+            await self.repository.save_trade_plan(self._trade_plan.model_dump(mode="json"), session_id=signal.session_id)
         for ev in tp_result.events:
             await self.bus.emit(getattr(EventType, ev["event"]), payload=ev)
         await self._evaluate_entry_conditions(tp_result.plan)
         await self._update_holding_duration(tp_result.plan)
+        # Phase D.1: an approved plan may already be invalid (e.g. the session
+        # closed or data went stale between risk approval and here).
+        await self._invalidate_trade_plan_if_needed(now)
         await self._submit_entry(signal)
 
     async def _record_execution_failure(self, signal: StrategySignal, reason: str) -> None:
@@ -1492,9 +1795,33 @@ class TradingEngine:
             },
         )
         if not sizing.ok:
+            self._trace(
+                "POSITION_SIZE", "REJECTED", decision="REJECT",
+                reason=sizing.rejected_reason or "sizing_failed",
+                inputs={"equity": sizing.equity, "stop_distance": sizing.stop_distance,
+                        "max_notional": max_notional},
+                output={"raw_quantity": sizing.raw_quantity, "final_quantity": sizing.final_quantity},
+            )
+            self._trace("OMS", "SKIPPED", decision="NO_ORDER", reason=sizing.rejected_reason)
+            self._trace("EXECUTION_GATE", "SKIPPED", decision="NO_ORDER", reason="sizing_rejected")
             await self._record_execution_failure(signal, sizing.rejected_reason or "sizing_failed")
             return
 
+        self._trace(
+            "POSITION_SIZE", "PASS", decision="SIZE",
+            reason="risk_based",
+            inputs={"equity": round(sizing.equity, 2), "stop_distance": round(sizing.stop_distance, 6),
+                    "risk_budget": round(sizing.risk_budget, 6), "max_notional": max_notional,
+                    "price": price},
+            output={
+                "raw_quantity": round(sizing.raw_quantity, 8),
+                "normalized_quantity": round(sizing.normalized_quantity, 8),
+                "final_quantity": round(sizing.final_quantity, 8),
+                "minimum_quantity": self.config.position_sizing.minimum_quantity,
+                "maximum_quantity": self.config.position_sizing.maximum_quantity,
+                "quantity_precision": self.config.position_sizing.quantity_precision,
+            },
+        )
         if not self.execution_enabled:
             # EXECUTION SAFETY (Phase B, fail-closed): risk approved and sizing
             # computed for diagnostics, but execution is disabled — so we stop
@@ -1526,6 +1853,17 @@ class TradingEngine:
             await self.bus.emit(
                 EventType.ENTRY_BLOCKED,
                 payload={"signal_id": signal.signal_id, "reason": "execution_disabled"},
+            )
+            self._trace(
+                "OMS", "BLOCKED", decision="NO_ORDER", reason="execution_disabled",
+                output={"orders": len(self.oms.all_orders())},
+            )
+            self._trace(
+                "EXECUTION_GATE", "BLOCKED", decision="DISABLED",
+                reason="execution.enabled=false",
+                output={"status": self.execution_status()["status"],
+                        "order_creation": self.execution_status()["order_creation"],
+                        "broker_contact": self.execution_status()["broker_contact"]},
             )
             return
 
@@ -2024,34 +2362,61 @@ class TradingEngine:
 
         self.state.risk = self._risk_status(now)
         self.state.session = self.session.snapshot(now)
+        # Phase D.1: re-check the active TradePlan on every tick so a plan can
+        # never outlive the market state that justified it.
+        await self._invalidate_trade_plan_if_needed(now)
         await self._publish_readiness_change()
 
     async def _update_data_health(self, now: datetime) -> None:
-        age = self.store.data_age(self.symbol, now)
-        # Freshness MEASUREMENT (Phase C): what the dashboard/health report use.
-        # The entry-BLOCKING decision stays in risk.stale_market_data and is
-        # applied in _build_risk_context — measurement and policy are separate.
-        limit = self.config.market_data.freshness.threshold_seconds
+        # Phase D.1: ONE authoritative freshness measurement. This previously
+        # used the deprecated static `freshness.threshold_seconds`, which made
+        # health reporting disagree with the risk gate (cadence-aware). Both
+        # now read FreshnessPolicy so they cannot drift apart again.
+        fp = self.freshness_policy
+        bar_expected = timeframe_minutes(self.config.market_data.bars.timeframe) * 60
         if self.config.market_data.bars.enabled and self._last_bar_at is not None:
-            # Phase C1: primary strategy freshness is the BAR stream, not trades.
-            age = (now - self._last_bar_at).total_seconds()
+            result = fp.evaluate(
+                source="bar", last_received=self._last_bar_at, now=now,
+                expected_interval_seconds=bar_expected,
+            )
+            age = result.age_seconds
+            stale = result.is_stale
+            limit = result.effective_threshold_seconds
         else:
             age = self.store.data_age(self.symbol, now)
-        stale = age is None or age > limit
+            limit = fp._threshold_for("quote")
+            stale = age is None or age > limit
         if stale and not self._stale_flag:
             self._stale_flag = True
             self.state.set_component("market_data", HealthState.WARNING, f"data_age={age}")
             logger.warning(
                 "MARKET DATA STALE",
-                extra={"structured": {"event": "MARKET_DATA_STALE", "component": "engine", "age": age}},
+                extra={"structured": {
+                    "event": "MARKET_DATA_STALE", "component": "engine",
+                    "latest_market_timestamp": self._last_bar_at.isoformat() if self._last_bar_at else None,
+                    "current_timestamp": now.isoformat(),
+                    "observed_age_seconds": age,
+                    "measurement_threshold": limit,
+                    "health_state": "WARNING", "reason": "STALE",
+                }},
             )
-            await self.bus.emit(EventType.MARKET_DATA_STALE, payload={"symbol": self.symbol, "age": age})
+            await self.bus.emit(
+                EventType.MARKET_DATA_STALE,
+                payload={"symbol": self.symbol, "age": age, "threshold": limit, "reason": "STALE"},
+            )
         elif not stale and self._stale_flag:
             self._stale_flag = False
             self.state.set_component("market_data", HealthState.HEALTHY, self.provider.health().detail)
             logger.info(
                 "MARKET DATA FRESH",
-                extra={"structured": {"event": "MARKET_DATA_CONNECTED", "component": "engine"}},
+                extra={"structured": {
+                    "event": "MARKET_DATA_CONNECTED", "component": "engine",
+                    "latest_market_timestamp": self._last_bar_at.isoformat() if self._last_bar_at else None,
+                    "current_timestamp": now.isoformat(),
+                    "observed_age_seconds": age,
+                    "measurement_threshold": limit,
+                    "health_state": "HEALTHY", "reason": "FRESH",
+                }},
             )
             await self.bus.emit(EventType.MARKET_DATA_CONNECTED, payload={"symbol": self.symbol})
 
@@ -2202,6 +2567,11 @@ class TradingEngine:
         data["trade_plan"] = (
             self._trade_plan.model_dump(mode="json") if self._trade_plan else None
         )
+        # Phase D.1: decision trace + TradePlan history.
+        data["decision_trace"] = self.decision_trace()
+        data["trade_plan_history"] = [
+            p.model_dump(mode="json") for p in self._trade_plan_history[-20:]
+        ]
         return data
 
     @property

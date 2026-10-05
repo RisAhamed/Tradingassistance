@@ -237,6 +237,60 @@ def create_router() -> APIRouter:
         runtime = _runtime(request)
         return runtime.engine.payload().get("timeframe_selection")
 
+    # -- Phase D.1: read-only decision observability -----------------------
+    @router.get("/api/freshness")
+    async def freshness(request: Request):
+        """Authoritative freshness measurement shared by health and risk."""
+        runtime = _runtime(request)
+        engine = runtime.engine
+        return {
+            "streams": engine.stream_state(),
+            "policy": engine.freshness_policy.config.model_dump(mode="json"),
+            "stale_action": engine.freshness_policy.stale_action(),
+            "stale_flag": engine._stale_flag,
+            "data_integrity_ok": engine._data_gap_ok,
+        }
+
+    @router.get("/api/decision-trace")
+    async def decision_trace(request: Request, limit: int = 100):
+        """Reconstructable record of the current/last decision cycle."""
+        runtime = _runtime(request)
+        trace = runtime.engine.decision_trace()
+        return {"decision_trace": trace[-max(1, limit):], "stages": len(trace)}
+
+    @router.get("/api/trade-plan/history")
+    async def trade_plan_history(request: Request, limit: int = 20):
+        """Persisted + in-memory TradePlan history (read-only)."""
+        runtime = _runtime(request)
+        engine = runtime.engine
+        plans = [
+            p.model_dump(mode="json")
+            for p in engine._trade_plan_history[-max(1, limit):]
+        ]
+        if engine.repository is not None and engine.repository.available:
+            latest = await engine.repository.load_latest_trade_plan()
+            if latest is not None and not any(p.get("plan_id") == latest.get("plan_id") for p in plans):
+                plans.append(latest)
+        return {"trade_plans": plans, "count": len(plans)}
+
+    @router.get("/api/trade-plan/lifecycle")
+    async def trade_plan_lifecycle(request: Request):
+        """Explicit lifecycle transitions of the current TradePlan."""
+        runtime = _runtime(request)
+        engine = runtime.engine
+        plan = engine._trade_plan
+        if plan is None:
+            return {"trade_plan": None, "lifecycle": [], "status": None}
+        return {
+            "trade_plan": plan.model_dump(mode="json"),
+            "status": plan.status.value,
+            "previous_status": plan.previous_status.value if plan.previous_status else None,
+            "invalidation_reason": plan.invalidation_reason,
+            "lifecycle": plan.lifecycle_history,
+            "valid_now": engine.trade_plan_invalidity(plan, _now()) is None,
+            "current_invalidity_reason": engine.trade_plan_invalidity(plan, _now()),
+        }
+
     @router.get("/api/stream")
     async def stream(request: Request):
         runtime = _runtime(request)
