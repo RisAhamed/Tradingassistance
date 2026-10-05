@@ -161,6 +161,35 @@ class AlpacaPaperBroker(BrokerAdapter):
         self._to_execution(order, raw)
         return order
 
+    async def get_orders(self, *, status: str | None = None) -> list[Order]:
+        # D.3: list paper orders through the same paper TradingClient.
+        from alpaca.trading.requests import GetOrdersRequest
+
+        try:
+            raw_orders = await asyncio.to_thread(
+                self._client.get_orders,
+                filter=GetOrdersRequest(status=(status or "all").lower()),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("alpaca get_orders failed", extra={"structured": {"event": "ORDER_QUERY_FAILED", "component": "broker", "error": str(exc)[:200]}})
+            return []
+        out: list[Order] = []
+        for raw in raw_orders or []:
+            order = Order(
+                order_id=str(getattr(raw, "client_order_id", "") or str(getattr(raw, "id", ""))),
+                client_order_id=str(getattr(raw, "client_order_id", "") or ""),
+                symbol=str(getattr(raw, "symbol", SYMBOL_FALLBACK)),
+                side=Side.BUY if str(getattr(raw, "side", "buy")).split(".")[-1].lower() == "buy" else Side.SELL,
+                direction=Direction.LONG,
+                quantity=float(getattr(raw, "qty", 0.0) or 0.0),
+                broker_order_id=str(getattr(raw, "id", "")),
+            )
+            execution = self._to_execution(order, raw)
+            order.status = execution.status
+            order.filled_quantity = sum(f.quantity for f in execution.fills)
+            out.append(order)
+        return out
+
     async def close_position(self, position: Position) -> BrokerExecution:
         try:
             raw = await asyncio.to_thread(self._client.close_position, position.symbol)
@@ -197,6 +226,9 @@ class AlpacaPaperBroker(BrokerAdapter):
             )
         reject_reason = f"alpaca_status={status_value}" if status is OrderStatus.REJECTED else None
         return BrokerExecution(str(getattr(raw, "id", "")), status, fills=fills, reject_reason=reject_reason)
+
+
+SYMBOL_FALLBACK = "UNKNOWN"
 
 
 def _clean(message: str) -> str:
