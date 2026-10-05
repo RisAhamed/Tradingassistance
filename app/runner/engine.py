@@ -2546,6 +2546,21 @@ class TradingEngine:
                     await asyncio.sleep(0.05)
                     if self.position_manager.is_flat:
                         break
+            else:
+                # D.4: a broker-carried position that local state does not
+                # track must still be closed - never assume broker truth is a
+                # forgivable zero. Close it explicitly.
+                bstatus3, bpos3 = await self._authoritative_broker_positions()
+                if bstatus3 == "ok" and bpos3:
+                    logger.warning(
+                        "BROKER-SIDE POSITION NOT TRACKED LOCALLY - closing",
+                        extra={"structured": {"event": "BROKER_POSITION_READ", "component": "session", "count": len(bpos3)}},
+                    )
+                    for p in bpos3:
+                        try:
+                            await self.broker.close_position(p)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.error("broker close_position failed", extra={"structured": {"event": "FLATTEN_FAILED", "component": "session", "error": str(exc)[:200]}})
             broker_positions = (await self._authoritative_broker_positions())[1]
             if not self.position_manager.is_flat or broker_positions:
                 remaining = abs(self.position_manager.position.quantity)

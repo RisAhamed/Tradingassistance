@@ -94,6 +94,9 @@ class AlpacaPaperBroker(BrokerAdapter):
 
         side = OrderSide.BUY if order.side is Side.BUY else OrderSide.SELL
         tif = AlpacaTif.GTC
+        if "/" in order.symbol:
+            # D.4: Alpaca crypto market orders must use IOC; GTC is rejected.
+            tif = AlpacaTif.IOC
         if order.order_type is OrderType.LIMIT and order.limit_price:
             return LimitOrderRequest(
                 symbol=order.symbol,
@@ -130,6 +133,7 @@ class AlpacaPaperBroker(BrokerAdapter):
                 },
             )
             return BrokerExecution(order.order_id, OrderStatus.REJECTED, reject_reason=_clean(str(exc)))
+        order.broker_order_id = str(getattr(raw, "id", ""))
         return self._to_execution(order, raw)
 
     async def cancel_order(self, order: Order) -> Order:
@@ -225,6 +229,15 @@ class AlpacaPaperBroker(BrokerAdapter):
                 )
             )
         reject_reason = f"alpaca_status={status_value}" if status is OrderStatus.REJECTED else None
+        # D.4: keep the caller's Order object authoritative-consistent so
+        # get_order/submit_order cannot leave the local model at NEW forever.
+        order.status = status
+        if fills:
+            order.filled_quantity = sum(f.quantity for f in fills)
+            order.average_fill_price = fills[-1].price
+        if order.submitted_at is None:
+            order.submitted_at = utcnow()
+        order.updated_at = utcnow()
         return BrokerExecution(str(getattr(raw, "id", "")), status, fills=fills, reject_reason=reject_reason)
 
 
