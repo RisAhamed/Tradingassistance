@@ -36,6 +36,20 @@ def _engine(*, execution_enabled: bool):
     return build_runtime(_config(execution_enabled=execution_enabled), get_env()).engine
 
 
+def test_execution_disabled_does_not_construct_alpaca_trading_client(monkeypatch):
+    config = load_config(env=get_env())
+    config.execution.enabled = False
+    config.trading.broker = "alpaca"
+
+    def _unexpected(*args, **kwargs):
+        raise AssertionError("Alpaca trading client must not be constructed")
+
+    monkeypatch.setattr("app.brokers.alpaca.AlpacaPaperBroker.__init__", _unexpected)
+    runtime = build_runtime(config, get_env())
+    assert runtime.engine.execution_enabled is False
+    assert runtime.engine.broker.name == "mock"
+
+
 async def _pump(engine, limit: int = 700) -> None:
     provider = engine.provider
     ticks = 0

@@ -125,6 +125,7 @@ async def run(seconds: int) -> int:
     warm = engine.warmup_status()
     streams = engine.stream_state()
     readiness = engine.readiness()
+    provider_rejected = getattr(engine.provider, "rejected_count", None)
     bars_cfg = config.market_data.bars
     checks = [
         # --- Phase C1: historical warm-up + coverage -------------------------
@@ -137,7 +138,7 @@ async def run(seconds: int) -> int:
         # --- Phase C1: live 1-minute bar stream ------------------------------
         ("B1. bar stream connected", counts.get(EventType.BAR_STREAM_CONNECTED.value, 0) > 0),
         ("B2. bars subscribed", counts.get(EventType.BAR_STREAM_SUBSCRIBED.value, 0) > 0),
-        ("B3. live bars arrived", engine._last_bar_at is not None),
+        ("B3. live bars arrived", engine._live_bar_count > 0),
         ("B4. bar freshness meaningful", streams["bars"]["fresh"] is not None),
         # --- live feed --------------------------------------------------------
         ("L1. Alpaca connects", counts.get(EventType.ALPACA_CONNECTED.value, 0) > 0),
@@ -184,6 +185,14 @@ async def run(seconds: int) -> int:
             "risk_decision": engine._last_decision.reason.value if engine._last_decision else None,
             "orders": len(engine.oms.all_orders()),
             "freshness": streams,
+            "handoff": {
+                "live_bar_count": engine._live_bar_count,
+                "last_historical_at": engine._last_historical_at,
+                "last_bar_at": engine._last_bar_at,
+                "live_handoff": warm.get("live_handoff"),
+                "first_live_at": warm.get("first_live_at"),
+            },
+            "provider_rejected_count": provider_rejected,
             "warmup": {
                 "status": warm.get("status"),
                 "required_bars": warm.get("required_bars"),

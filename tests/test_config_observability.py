@@ -62,7 +62,18 @@ def test_dashboard_shows_all_required_panels():
         assert panel in html, f"dashboard missing {panel} panel"
     assert "P&amp;L" in html
     for element_id in ("health", "session", "system", "market", "features", "regime", "strategy", "risk", "position", "pnl", "orders", "ai", "stream"):
-        assert f'id="{element_id}"' in html, f"dashboard missing element {element_id}"
+        assert f'id="{element_id}"' in html, f"dashboard missing {element_id} element"
+    for element_id in ("handoff", "freshness-state", "decision-trace"):
+        assert f'id="{element_id}"' in html, f"dashboard missing {element_id} element"
+
+
+def test_handoff_endpoint_is_read_only_and_exposes_live_watermark():
+    with TestClient(create_app(config=_config(), autostart=False)) as client:
+        response = client.get("/api/handoff")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["live_bar_count"] == 0
+        assert "warmup" in payload
 
 
 # --- #12 critical event logging --------------------------------------------

@@ -51,6 +51,14 @@ def create_provider(config: AppConfig, env: EnvSettings, bus=None) -> MarketData
 
 
 def create_broker(config: AppConfig, env: EnvSettings) -> BrokerAdapter:
+    # Execution-disabled runtimes are market-data diagnostics only. Never
+    # instantiate an Alpaca trading client when the order gate is closed.
+    if not config.execution.enabled:
+        return MockBroker(
+            starting_equity=config.backtesting.initial_capital,
+            fee_percent=0.0,
+            slippage_percent=config.backtesting.slippage_percent,
+        )
     broker = config.trading.broker
     if broker == "mock":
         return MockBroker(

@@ -239,6 +239,9 @@ async def test_first_live_bar_after_history_is_accepted():
         )
     )
     assert engine._last_bar_at == last_hist + timedelta(minutes=1)
+    assert engine._live_bar_count == 1
+    assert engine.warmup["live_handoff"] == "completed"
+    assert engine.warmup["first_live_at"] == (last_hist + timedelta(minutes=1)).isoformat()
 
 
 # --- #11-#14 recovery, rebuilds, readiness -----------------------------------

@@ -29,6 +29,8 @@ class EventType(str, Enum):
     BAR_STREAM_CONNECTED = "BarStreamConnected"
     BAR_STREAM_SUBSCRIBED = "BarStreamSubscribed"
     BAR_RECEIVED = "BarReceived"
+    QUOTE_RECEIVED = "QuoteReceived"
+    TRADE_RECEIVED = "TradeReceived"
     BAR_REJECTED = "BarRejected"
     BAR_DUPLICATE = "BarDuplicate"
     BAR_OUT_OF_ORDER = "BarOutOfOrder"

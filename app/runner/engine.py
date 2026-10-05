@@ -107,6 +107,7 @@ class TradingEngine:
         self.warmup: dict = self._warmup_state(status="pending", reason=None)
         self._last_historical_at: datetime | None = None
         self._live_handoff_done = False
+        self._live_bar_count = 0
         self._data_gap_ok = True
         # Phase C1: per-stream freshness (never merged into one timestamp).
         self._last_bar_at: datetime | None = None
@@ -687,6 +688,9 @@ class TradingEngine:
         await self._detect_bar_gap(candle)
 
         self._last_bar_at = candle.timestamp
+        if self._last_historical_at is not None and candle.timestamp > self._last_historical_at:
+            self._live_bar_count += 1
+            await self._on_live_handoff(candle.timestamp)
         self.store.upsert_candle(candle)
         for derived in self.aggregator.add_candle(candle):
             self.store.add_candle(derived)
@@ -1193,6 +1197,7 @@ class TradingEngine:
         # historical bar, and record the boundary for gap detection.
         self._last_historical_at = candles[-1].timestamp
         self._live_handoff_done = False
+        self._live_bar_count = 0
         self._last_update_at[f"{self.symbol}:trade"] = self._last_historical_at
         # The historical series IS the base bar series: arm the bar watermark and
         # the expected next bar so the first live bar is validated against it.

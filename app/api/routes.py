@@ -252,6 +252,20 @@ def create_router() -> APIRouter:
             "data_integrity_ok": engine._data_gap_ok,
         }
 
+    @router.get("/api/handoff")
+    async def handoff(request: Request):
+        """Read-only history-to-live handoff and live-bar diagnostics."""
+        runtime = _runtime(request)
+        engine = runtime.engine
+        return {
+            "warmup": engine.warmup_status(),
+            "last_historical_at": engine._last_historical_at.isoformat() if engine._last_historical_at else None,
+            "last_bar_at": engine._last_bar_at.isoformat() if engine._last_bar_at else None,
+            "live_bar_count": engine._live_bar_count,
+            "provider_rejected_count": getattr(engine.provider, "rejected_count", None),
+            "recovery": engine.recovery,
+        }
+
     @router.get("/api/decision-trace")
     async def decision_trace(request: Request, limit: int = 100):
         """Reconstructable record of the current/last decision cycle."""

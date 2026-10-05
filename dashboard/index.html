@@ -42,6 +42,7 @@
     <section><h2>System</h2><pre id="system">loading…</pre></section>
     <section><h2>Market Data</h2><pre id="mdata">loading…</pre></section>
     <section><h2>Warm-Up</h2><pre id="warm">loading…</pre></section>
+    <section><h2>History → Live</h2><pre id="handoff">loading…</pre></section>
     <section><h2>Readiness</h2><pre id="ready">loading…</pre></section>
     <section><h2>Execution</h2><pre id="exec">loading…</pre></section>
     <section><h2>Market</h2><pre id="market">loading…</pre></section>
@@ -73,10 +74,10 @@
     }
     async function refresh() {
       try {
-        const [health, system, market, mdata, warm, exec, ready, features, regime, strategy, risk, positions, pnl, orders, session, ai, decision, freshnessState, lifecycle] =
+        const [health, system, market, mdata, warm, handoff, exec, ready, features, regime, strategy, risk, positions, pnl, orders, session, ai, decision, freshnessState, lifecycle] =
           await Promise.all([
             get("/health"), get("/api/system/status"), get("/api/market/latest"), get("/api/market/status"),
-            get("/api/warmup"), get("/api/execution"), get("/api/readiness"),
+            get("/api/warmup"), get("/api/handoff"), get("/api/execution"), get("/api/readiness"),
             get("/api/features"), get("/api/regime"), get("/api/strategy/status"), get("/api/risk/status"), get("/api/positions"),
             get("/api/pnl"), get("/api/orders"), get("/api/session"), get("/api/ai/status"), get("/api/decision"),
             get("/api/freshness"), get("/api/trade-plan/lifecycle"),
@@ -102,7 +103,7 @@
           (md.symbol ? " · " + md.symbol : "");
         $("conn").className = "banner " + (md.data_status === "LIVE" ? "ok" : "warn");
 
-        show("system", system); show("mdata", md); show("warm", warm); show("exec", exec); show("ready", ready); show("market", market);
+        show("system", system); show("mdata", md); show("warm", warm); show("handoff", handoff); show("exec", exec); show("ready", ready); show("market", market);
         show("features", features); show("regime", regime);
         show("strategy", strategy); show("risk", risk); show("position", positions);
         show("pnl", pnl); show("orders", orders); show("sess", session); show("ai", ai);

@@ -156,18 +156,12 @@ class AlpacaMarketDataProvider(MarketDataProvider):
                 )
                 self._last_at = candle.timestamp
                 self._bars_seen += 1
-                # High-frequency: never logged at INFO.
-                logger.debug(
-                    "bar received",
-                    extra={
-                        "structured": {
-                            "event": "BAR_RECEIVED",
-                            "component": "market_data.alpaca",
-                            "symbol": symbol,
-                            "timeframe": self.bar_timeframe,
-                            "timestamp": candle.timestamp.isoformat(),
-                        }
-                    },
+                await self._emit(
+                    EventType.BAR_RECEIVED,
+                    "BAR_RECEIVED",
+                    symbol=symbol,
+                    timeframe=self.bar_timeframe,
+                    timestamp=candle.timestamp.isoformat(),
                 )
                 await self._dispatch(candle)
         except (TypeError, ValueError) as exc:
@@ -200,6 +194,14 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         except (TypeError, ValueError) as exc:
             return self._reject("quote", f"malformed:{exc}")
         self._last_at = quote.timestamp
+        await self._emit(
+            EventType.QUOTE_RECEIVED,
+            "QUOTE_RECEIVED",
+            symbol=symbol,
+            timestamp=quote.timestamp.isoformat(),
+            bid=quote.bid,
+            ask=quote.ask,
+        )
         await self._dispatch(quote)
 
     async def _on_trade(self, data) -> None:
@@ -217,6 +219,14 @@ class AlpacaMarketDataProvider(MarketDataProvider):
         except (TypeError, ValueError) as exc:
             return self._reject("trade", f"malformed:{exc}")
         self._last_at = trade.timestamp
+        await self._emit(
+            EventType.TRADE_RECEIVED,
+            "TRADE_RECEIVED",
+            symbol=symbol,
+            timestamp=trade.timestamp.isoformat(),
+            price=trade.price,
+            size=trade.size,
+        )
         await self._dispatch(trade)
 
     async def _run_stream(self) -> None:
