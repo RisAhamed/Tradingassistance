@@ -116,6 +116,18 @@ class EventType(str, Enum):
     DECISION_BLOCKED = "DecisionBlocked"
     FUTURE_TIMESTAMP_REJECTED = "FutureTimestampRejected"
     RECOVERY_STATE_CHANGED = "RecoveryStateChanged"
+    ENTRY_CUTOFF_REACHED = "EntryCutoffReached"
+    ENTRY_BLOCKED_SESSION_CUTOFF = "EntryBlockedSessionCutoff"
+    MAX_HOLDING_REACHED = "MaxHoldingReached"
+    FLATTEN_STARTED = "FlattenStarted"
+    FLATTEN_ORDER_CREATED = "FlattenOrderCreated"
+    FLATTEN_PARTIAL_FILL = "FlattenPartialFill"
+    BROKER_POSITION_READ = "BrokerPositionRead"
+    BROKER_POSITION_ZERO = "BrokerPositionZero"
+    SESSION_FLAT = "SessionFlat"
+    SESSION_CLOSED = "SessionClosed"
+    SESSION_CLOSEOUT_FAILED = "SessionCloseoutFailed"
+    SESSION_HALTED = "SessionHalted"
 
 
 class Event(BaseModel):

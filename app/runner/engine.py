@@ -173,6 +173,7 @@ class TradingEngine:
         self._entry_order_id: str | None = None
         self._exiting = False
         self._flatten_done = False
+        self._flatten_in_progress = False
         self._last_decision: RiskDecision | None = None
         self._stale_flag = False
         self._last_account_refresh: datetime | None = None
@@ -409,6 +410,43 @@ class TradingEngine:
 
         if reconcile:
             await self.reconcile()
+
+        # D.1.4: next-session safety — authoritative broker position check
+        # BEFORE a new session may trade. Never trust persisted local state.
+        bstatus, bpositions = await self._authoritative_broker_positions()
+        await self.bus.emit(
+            EventType.BROKER_POSITION_READ,
+            payload={"status": bstatus, "count": len(bpositions), "symbol": self.symbol},
+        )
+        logger.info(
+            "BROKER POSITION READ",
+            extra={"structured": {"event": "BROKER_POSITION_READ", "component": "engine", "status": bstatus, "count": len(bpositions)}},
+        )
+        if bstatus == "ok" and bpositions:
+            # A broker-carried position means the new session must NOT allow
+            # entries until recovery/flatten has made the account safe.
+            self._need_reconciliation = True
+            for p in bpositions:
+                logger.critical(
+                    "UNEXPECTED BROKER POSITION AT SESSION START",
+                    extra={"structured": {"event": "SESSION_CLOSEOUT_FAILED", "component": "session", "symbol": p.symbol, "quantity": p.quantity}},
+                )
+            await self.bus.emit(
+                EventType.SESSION_CLOSEOUT_FAILED,
+                payload={"reason": "broker_position_present_at_start", "count": len(bpositions)},
+            )
+            self.state.reconciliation = {
+                "ok": False,
+                "discrepancies": [f"broker_position_present:{p.symbol}:{p.quantity}" for p in bpositions],
+                "last_run_at": utcnow().isoformat(),
+                "mode": "startup_guard",
+                "broker_position_status": bstatus,
+            }
+        elif bstatus == "unavailable":
+            logger.warning(
+                "BROKER POSITION UNVERIFIABLE (execution disabled)",
+                extra={"structured": {"event": "RECONCILIATION_COMPLETED", "component": "engine", "mode": "execution_disabled", "note": "startup broker position unverified"}},
+            )
 
         session_id = self.session.start(utcnow())
         await self.bus.emit(
@@ -2257,6 +2295,14 @@ class TradingEngine:
             held_minutes = position.holding_seconds(now) / 60.0
             if held_minutes > self.config.session.max_holding_minutes:
                 reason = "max_holding_time"
+                await self.bus.emit(
+                    EventType.MAX_HOLDING_REACHED,
+                    payload={"held_minutes": held_minutes, "limit": self.config.session.max_holding_minutes},
+                )
+                logger.warning(
+                    "MAX HOLDING REACHED",
+                    extra={"structured": {"event": "MAX_HOLDING_REACHED", "component": "session", "held_minutes": round(held_minutes, 1), "limit": self.config.session.max_holding_minutes}},
+                )
 
         if reason is not None:
             await self._exit(reason)
@@ -2306,6 +2352,30 @@ class TradingEngine:
             self._exiting = False
 
     # -- reconciliation -----------------------------------------------------
+    async def _authoritative_broker_positions(self):
+        """Authoritative broker position read, fail-closed.
+
+        Returns (status, positions) where status is:
+            "ok"          - broker responded (mock/fake always may; alpaca only
+                            while connected, i.e. execution enabled)
+            "unavailable" - alpaca not connected and execution disabled: we
+                            MUST NOT contact the broker (Phase B safety), so the
+                            authoritative position is UNVERIFIABLE
+            "error"       - the broker query itself failed
+        """
+        connected = self.broker.health().connected
+        if not connected and self.broker.name == "alpaca":
+            return "unavailable", []
+        try:
+            positions = await self.broker.get_positions()
+            return "ok", positions
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "BROKER POSITION QUERY FAILED",
+                extra={"structured": {"event": "BROKER_POSITION_READ", "component": "engine", "status": "error", "error": str(exc)}},
+            )
+            return "error", []
+
     async def reconcile(self) -> bool:
         """Compare broker state with internal state; block entries on mismatch.
 
@@ -2318,32 +2388,69 @@ class TradingEngine:
         )
         await self.bus.emit(EventType.RECONCILIATION_STARTED, payload={"symbol": self.symbol})
         if not self.execution_enabled:
-            # EXECUTION SAFETY: while execution is disabled no order can exist,
-            # so internal state is trivially flat and there is nothing to compare
-            # against a broker. Crucially we do NOT contact the broker here, and
-            # we do NOT assume anything about real positions — we simply record
-            # that reconciliation is not applicable in this mode.
+            # EXECUTION SAFETY: broker contact is forbidden while execution is
+            # disabled, EXCEPT for position-less mock/fake brokers whose
+            # get_positions is a local, deterministic read (test seam).
+            status, broker_positions = await self._authoritative_broker_positions()
+            if status == "ok":
+                # D.1.4: compare local vs authoritative positions - never assume
+                # flat. Local flat + broker empty = MATCH(flat). Local flat +
+                # broker non-empty = MISMATCH (Case C). Local non-flat + broker
+                # same = MATCH. Local non-flat + broker different = MISMATCH.
+                local = self.position_manager.position
+                discrepancies: list[str] = []
+                for p in broker_positions:
+                    if local.is_flat or p.symbol != local.symbol:
+                        discrepancies.append(f"broker position {p.symbol} not tracked internally")
+                    elif abs(p.quantity - abs(local.quantity)) > 1e-9:
+                        discrepancies.append(
+                            f"quantity mismatch {p.symbol}: local={local.quantity} broker={p.quantity}"
+                        )
+                if (not local.is_flat) and not any(
+                    p.symbol == local.symbol for p in broker_positions
+                ):
+                    discrepancies.append(f"internal position {local.symbol} not present at broker")
+                if discrepancies:
+                    self._need_reconciliation = True
+                    self.state.reconciliation = {
+                        "ok": False,
+                        "discrepancies": discrepancies,
+                        "last_run_at": utcnow().isoformat(),
+                        "mode": "execution_disabled",
+                        "broker_position_status": status,
+                    }
+                    logger.critical(
+                        "RECONCILIATION MISMATCH",
+                        extra={"structured": {"event": "RECONCILIATION_FAILED", "component": "engine", "count": len(discrepancies)}},
+                    )
+                    await self.bus.emit(EventType.RECONCILIATION_FAILED, payload={"discrepancies": discrepancies})
+                    return False
+            if status == "error":
+                # UNKNOWN broker state is never treated as flat (D.1.4).
+                self._need_reconciliation = True
+                self.state.reconciliation = {
+                    "ok": False,
+                    "discrepancies": ["broker_position_query_failed"],
+                    "last_run_at": utcnow().isoformat(),
+                    "mode": "execution_disabled",
+                    "broker_position_status": status,
+                }
+                await self.bus.emit(EventType.RECONCILIATION_FAILED, payload={"discrepancies": ["broker_position_query_failed"]})
+                return False
             self._need_reconciliation = False
             self.state.reconciliation = {
                 "ok": True,
                 "discrepancies": [],
                 "last_run_at": utcnow().isoformat(),
                 "mode": "execution_disabled",
-                "note": "no orders possible while execution is disabled",
+                "broker_position_status": status,
+                "note": "no orders possible while execution is disabled" if status != "ok" else "broker position verified empty (mock seam)",
             }
             logger.info(
                 "RECONCILIATION SKIPPED (execution disabled)",
-                extra={
-                    "structured": {
-                        "event": "RECONCILIATION_COMPLETED",
-                        "component": "engine",
-                        "mode": "execution_disabled",
-                    }
-                },
+                extra={"structured": {"event": "RECONCILIATION_COMPLETED", "component": "engine", "mode": "execution_disabled"}},
             )
-            await self.bus.emit(
-                EventType.RECONCILIATION_COMPLETED, payload={"mode": "execution_disabled"}
-            )
+            await self.bus.emit(EventType.RECONCILIATION_COMPLETED, payload={"mode": "execution_disabled"})
             return True
         try:
             await self.broker.get_account()
@@ -2383,6 +2490,21 @@ class TradingEngine:
         """
         if self._flatten_done and not force:
             return self.position_manager.is_flat
+        if self._flatten_in_progress:
+            # Concurrent flatten (e.g. from the tick loop) is never allowed to
+            # double-submit; it must observe the same attempt budget.
+            logger.warning(
+                "FLATTEN ALREADY IN PROGRESS - duplicate request coalesced",
+                extra={"structured": {"event": "FLATTEN_FAILED", "component": "session", "reason": "concurrent_flatten_coalesced"}},
+            )
+            return self.position_manager.is_flat
+        self._flatten_in_progress = True
+        try:
+            return await self._flatten_inner(force=force, session_closeout=session_closeout)
+        finally:
+            self._flatten_in_progress = False
+
+    async def _flatten_inner(self, *, force: bool, session_closeout: bool) -> bool:
         if session_closeout:
             self.session.begin_closeout(utcnow())
             await self.bus.emit(EventType.CLOSEOUT_STARTED, payload={"symbol": self.symbol})
@@ -2393,6 +2515,25 @@ class TradingEngine:
             logger.warning(
                 "FLATTEN REQUESTED",
                 extra={"structured": {"event": "FLATTEN_REQUESTED", "component": "session"}},
+            )
+        await self.bus.emit(EventType.FLATTEN_STARTED, payload={"symbol": self.symbol})
+        logger.info("FLATTEN STARTED", extra={"structured": {"event": "FLATTEN_STARTED", "component": "session"}})
+
+        # D.1.4: authoritative broker position is the flatten trigger/target.
+        bstatus, bpositions = await self._authoritative_broker_positions()
+        await self.bus.emit(
+            EventType.BROKER_POSITION_READ,
+            payload={"status": bstatus, "count": len(bpositions), "symbol": self.symbol},
+        )
+        logger.info(
+            "BROKER POSITION READ",
+            extra={"structured": {"event": "BROKER_POSITION_READ", "component": "session", "status": bstatus, "count": len(bpositions)}},
+        )
+        if not self.position_manager.is_flat and not bpositions and bstatus == "ok":
+            # Local/broker mismatch: never flatten the wrong thing.
+            logger.critical(
+                "LOCAL/BROKER MISMATCH BEFORE FLATTEN",
+                extra={"structured": {"event": "RECONCILIATION_MISMATCH", "component": "session"}},
             )
 
         closeout = self.config.session_closeout
@@ -2405,7 +2546,17 @@ class TradingEngine:
                     await asyncio.sleep(0.05)
                     if self.position_manager.is_flat:
                         break
-            broker_positions = await self.broker.get_positions()
+            broker_positions = (await self._authoritative_broker_positions())[1]
+            if not self.position_manager.is_flat or broker_positions:
+                remaining = abs(self.position_manager.position.quantity)
+                await self.bus.emit(
+                    EventType.FLATTEN_PARTIAL_FILL,
+                    payload={"attempt": attempt, "remaining_quantity": remaining, "broker_positions": len(broker_positions)},
+                )
+                logger.warning(
+                    "FLATTEN INCOMPLETE",
+                    extra={"structured": {"event": "FLATTEN_PARTIAL_FILL", "component": "session", "attempt": attempt, "remaining": remaining}},
+                )
             success = self.position_manager.is_flat and not broker_positions
             if success:
                 break
@@ -2414,7 +2565,8 @@ class TradingEngine:
                 extra={"structured": {"event": "FLATTEN_FAILED", "component": "session", "attempt": attempt}},
             )
 
-        success = self.position_manager.is_flat and not await self.broker.get_positions()
+        bstatus2, broker_positions2 = await self._authoritative_broker_positions()
+        success = self.position_manager.is_flat and not broker_positions2
         if session_closeout:
             self._flatten_done = True
         if success:
@@ -2423,12 +2575,17 @@ class TradingEngine:
                 extra={"structured": {"event": "FLATTEN_COMPLETED", "component": "session"}},
             )
             await self.bus.emit(EventType.FLATTEN_COMPLETED, payload={"symbol": self.symbol})
+            await self.bus.emit(EventType.BROKER_POSITION_ZERO, payload={"symbol": self.symbol})
+            await self.bus.emit(EventType.SESSION_FLAT, payload={"symbol": self.symbol})
+            if session_closeout:
+                await self.bus.emit(EventType.SESSION_CLOSED, payload={"symbol": self.symbol, "state": self.session.state.value})
         else:
             logger.critical(
                 "SESSION FLATTEN FAILED",
                 extra={"structured": {"event": "FLATTEN_FAILED", "component": "session"}},
             )
             await self.bus.emit(EventType.FLATTEN_FAILED, payload={"symbol": self.symbol})
+            await self.bus.emit(EventType.SESSION_CLOSEOUT_FAILED, payload={"symbol": self.symbol})
         if session_closeout:
             self.session.mark_flat(success=success, note="flatten_ok" if success else "flatten_failed")
         else:
@@ -2438,6 +2595,7 @@ class TradingEngine:
     # -- periodic tick ------------------------------------------------------
     async def tick(self, now: datetime) -> None:
         previous = self.session.state
+        previous_entries = self.session.entries_allowed
         state = self.session.update(now)
         if state is not previous:
             await self.bus.emit(
@@ -2451,6 +2609,22 @@ class TradingEngine:
                     self.session.started_at,
                     self.session.snapshot(now).model_dump(mode="json"),
                 )
+
+        # D.1.4: explicit cutoff observability.
+        if previous_entries and not self.session.entries_allowed and state is SessionState.TRADING:
+            await self.bus.emit(EventType.ENTRY_BLOCKED_SESSION_CUTOFF, payload={"symbol": self.symbol})
+            logger.info(
+                "ENTRY BLOCKED (session cutoff)",
+                extra={"structured": {"event": "ENTRY_BLOCKED_SESSION_CUTOFF", "component": "session"}},
+            )
+        cutoff_reached = any(h.get("event") == "ENTRY_CUTOFF_REACHED" for h in self.session.history[-1:])
+        if cutoff_reached and not getattr(self, "_cutoff_logged", False):
+            self._cutoff_logged = True
+            await self.bus.emit(EventType.ENTRY_CUTOFF_REACHED, payload={"symbol": self.symbol})
+            logger.info(
+                "ENTRY CUTOFF REACHED",
+                extra={"structured": {"event": "ENTRY_CUTOFF_REACHED", "component": "session"}},
+            )
 
         if state is SessionState.CLOSEOUT and not self._flatten_done:
             await self.flatten(session_closeout=True)

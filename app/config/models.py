@@ -692,6 +692,22 @@ class AppConfig(_Section):
                 "position_sizing.risk_per_trade_percent is deprecated and must match "
                 "risk.risk_per_trade_percent when supplied"
             )
+        # D.1.4: session.max_holding_minutes (engine exit trigger) and
+        # risk.maximum_holding_minutes (risk-gate blocker) must not silently
+        # disagree — a mismatch means the engine and the risk gate enforce
+        # different holding limits. TradePlan carries the same policy to the
+        # plan lifecycle.
+        holding = {
+            self.session.max_holding_minutes,
+            self.risk.maximum_holding_minutes,
+        }
+        if self.trade_plan.maximum_holding_minutes is not None:
+            holding.add(self.trade_plan.maximum_holding_minutes)
+        if len(holding) > 1:
+            raise ValueError(
+                "session.max_holding_minutes, risk.maximum_holding_minutes and "
+                "trade_plan.maximum_holding_minutes must be equal"
+            )
         return self
 
 

@@ -130,6 +130,9 @@ def create_router() -> APIRouter:
             "summary": runtime.engine.session.build_summary(
                 _now(), realized=runtime.engine.pnl.realized, fees=runtime.engine.pnl.fees
             ).model_dump(mode="json"),
+            "reconciliation": runtime.engine.state.reconciliation,
+            "entries_allowed": runtime.engine.session.entries_allowed,
+            "session_history": runtime.engine.session.history,
         }
 
     @router.get("/api/ai/status")
