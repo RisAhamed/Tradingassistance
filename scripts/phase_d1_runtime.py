@@ -37,6 +37,7 @@ def _config(storage_path=None):
     env = get_env()
     config = load_config(env=env)
     config.market_data.provider = "mock"
+    config.market_data.max_future_skew_seconds = 86400 * 30
     config.trading.broker = "mock"
     config.execution.enabled = False        # EXECUTION OFF - never changed
     config.ai.enabled = False
