@@ -10,6 +10,7 @@ Safety invariants enforced here:
 * ambiguous order submissions trigger reconciliation, never a blind retry.
 """
 from __future__ import annotations
+import dataclasses
 
 import asyncio
 import logging
@@ -38,6 +39,10 @@ from app.domain.regime import RegimeSnapshot
 from app.domain.risk import RiskDecision
 from app.domain.signals import StrategySignal
 from app.events.bus import EventBus
+from app.decision.freshness import FreshnessPolicy
+from app.decision.selector import TimeframeSelector, TimeframeSelection
+from app.decision.trade_plan import TradePlanBuilder
+from app.domain.trade_plan import TradePlan
 from app.events.types import EventType
 from app.execution.executor import ExecutionResult, OrderExecutor
 from app.features.engine import FeatureEngine
@@ -169,6 +174,13 @@ class TradingEngine:
         # MARKET-DATA SAFETY: last accepted update timestamp per symbol, used
         # to reject out-of-order / duplicate ticks (never invent prices).
         self._last_update_at: dict[str, datetime] = {}
+        # Phase D: cadence-aware freshness, dynamic timeframes, TradePlan.
+        self.freshness_policy = FreshnessPolicy(config.market_data.freshness)
+        self.timeframe_selector = TimeframeSelector(config.timeframes.selection)
+        self.trade_plan_builder = TradePlanBuilder(config.trade_plan)
+        self._timeframe_selection: TimeframeSelection | None = None
+        self._trade_plan: TradePlan | None = None
+        self._last_freshness: dict[str, object] | None = None
 
     # -- component wiring ---------------------------------------------------
     @property
@@ -696,7 +708,27 @@ class TradingEngine:
     async def evaluate(self, now: datetime | None = None) -> StrategySignal | None:
         """Run features -> regime -> strategy for the signal timeframe."""
         now = now or utcnow()
-        features = self._features_for(self.config.timeframes.signal, now)
+        # Phase D: cadence-aware freshness evaluation (every evaluation cycle)
+        fp = self.freshness_policy
+        bar_expected = timeframe_minutes(self.config.market_data.bars.timeframe) * 60
+        bar_fresh = fp.evaluate(source="bar", last_received=self._last_bar_at, now=now, expected_interval_seconds=bar_expected)
+        await self._emit_freshness(now, {"bar": bar_fresh})
+        # Phase D: dynamic timeframe selection
+        regime_for_select = self.state.regime
+        if regime_for_select is None:
+            regime_for_select = self.regime_engine.classify(self.state.features or self._features_for(self.config.timeframes.context, now), now=now)
+        selection = self.timeframe_selector.select(
+            regime=regime_for_select,
+            features=self.state.features or self._features_for(self.config.timeframes.signal, now),
+            snapshot=self.state.latest_snapshot,
+            now=now,
+        )
+        self._timeframe_selection = selection
+        await self._emit_timeframe_selection(selection)
+        # Use selected timeframes when available; fall back to config.
+        signal_tf = selection.signal_timeframe if not selection.blocked else self.config.timeframes.signal
+        context_tf = selection.context_timeframe if not selection.blocked else self.config.timeframes.context
+        features = self._features_for(signal_tf, now)
         self.state.features = features
         self.state.last_evaluation_at = now
         logger.info(
@@ -1284,20 +1316,18 @@ class TradingEngine:
 
     # -- risk gate ----------------------------------------------------------
     def _build_risk_context(self, now: datetime) -> RiskContext:
-        age = self.store.data_age(self.symbol, now)
-        # Risk POLICY (fail-closed): the blocking threshold is a risk setting, and
-        # `market_data.freshness.stale_action` decides whether losing freshness
-        # actually blocks entries or only warns.
-        freshness = self.config.market_data.freshness
-        if self.config.market_data.bars.enabled and self._last_bar_at is not None:
-            # Phase C1: entries are gated on BAR freshness (canonical source), not
-            # on sparse trade arrival.
-            bar_age = (now - self._last_bar_at).total_seconds()
-            measured = bar_age <= self.config.risk.stale_market_data.maximum_age_seconds
-        else:
-            age = self.store.data_age(self.symbol, now)
-            measured = age is not None and age <= self.config.risk.stale_market_data.maximum_age_seconds
-        fresh = measured if freshness.stale_action == "block_entries" else True
+        # Risk POLICY (fail-closed): cadence-aware freshness. The effective
+        # bar threshold is max(configured_maximum_age, expected_interval +
+        # grace_period) so a healthy 60 s bar stream is never falsely stale.
+        fp = self.freshness_policy
+        bar_expected = timeframe_minutes(self.config.market_data.bars.timeframe) * 60
+        bar_result = fp.evaluate(
+            source="bar",
+            last_received=self._last_bar_at,
+            now=now,
+            expected_interval_seconds=bar_expected,
+        )
+        fresh = not bar_result.is_stale if fp.stale_action() == "block_entries" else True
         if not self._data_gap_ok:
             fresh = False
         position = self.position_manager.position
@@ -1389,6 +1419,24 @@ class TradingEngine:
             payload={"signal_id": signal.signal_id, "risk_id": decision.risk_id},
             correlation_id=signal.correlation_id,
         )
+        # Phase D: TradePlan
+        tp_result = self.trade_plan_builder.build_from_signal(
+            signal,
+            regime=self.state.regime or self.regime_engine.classify(self.state.features, now=now),
+            features=self.state.features or features,
+            snapshot=self.state.latest_snapshot,
+            context_timeframe=(self._timeframe_selection.context_timeframe if self._timeframe_selection and not self._timeframe_selection.blocked else self.config.timeframes.context),
+            signal_timeframe=(self._timeframe_selection.signal_timeframe if self._timeframe_selection else self.config.timeframes.signal),
+            execution_timeframe=(self._timeframe_selection.execution_timeframe if self._timeframe_selection and not self._timeframe_selection.blocked else self.config.timeframes.execution),
+            freshness_stale=self.freshness_policy.evaluate(source="bar", last_received=self._last_bar_at, now=now).is_stale,
+            correlation_id=signal.correlation_id,
+            session_id=signal.session_id,
+        )
+        self._trade_plan = tp_result.plan
+        for ev in tp_result.events:
+            await self.bus.emit(getattr(EventType, ev["event"]), payload=ev)
+        await self._evaluate_entry_conditions(tp_result.plan)
+        await self._update_holding_duration(tp_result.plan)
         await self._submit_entry(signal)
 
     async def _record_execution_failure(self, signal: StrategySignal, reason: str) -> None:
@@ -2066,6 +2114,73 @@ class TradingEngine:
         )
         return await self.reconcile()
 
+    async def _emit_freshness(self, now: datetime, results: dict) -> None:
+        """Publish FRESHNESS_EVALUATED / FRESHNESS_CHANGED events."""
+        summary = {}
+        for src, r in results.items():
+            summary[src] = {
+                "age_seconds": r.age_seconds,
+                "effective_threshold_seconds": r.effective_threshold_seconds,
+                "is_stale": r.is_stale,
+                "reason": r.reason,
+            }
+        await self.bus.emit(EventType.FRESHNESS_EVALUATED, payload=summary)
+        if self._last_freshness != summary:
+            self._last_freshness = summary
+            await self.bus.emit(EventType.FRESHNESS_CHANGED, payload=summary)
+
+    async def _emit_timeframe_selection(self, selection: TimeframeSelection) -> None:
+        if selection.blocked:
+            await self.bus.emit(
+                EventType.TIMEFRAME_SELECTION_BLOCKED,
+                payload={"reason": selection.reason, "inputs": selection.inputs},
+            )
+            logger.info(
+                "TIMEFRAME SELECTION BLOCKED",
+                extra={"structured": {"event": "TIMEFRAME_SELECTION_BLOCKED", "component": "engine", "reason": selection.reason}},
+            )
+        else:
+            await self.bus.emit(
+                EventType.TIMEFRAME_SELECTED,
+                payload={
+                    "context_timeframe": selection.context_timeframe,
+                    "signal_timeframe": selection.signal_timeframe,
+                    "execution_timeframe": selection.execution_timeframe,
+                    "reason": selection.reason,
+                    "method": selection.method,
+                },
+            )
+            logger.info(
+                "TIMEFRAME SELECTED",
+                extra={"structured": {"event": "TIMEFRAME_SELECTED", "component": "engine", "context": selection.context_timeframe, "signal": selection.signal_timeframe, "execution": selection.execution_timeframe, "reason": selection.reason}},
+            )
+
+    async def _emit_trade_plan_event(self, event: str, plan) -> None:
+        await self.bus.emit(
+            getattr(EventType, event),
+            payload={"plan_id": plan.plan_id, "status": plan.status.value, "direction": str(plan.direction) if plan.direction else None},
+        )
+
+    async def _evaluate_entry_conditions(self, plan) -> None:
+        for c in plan.entry_conditions:
+            await self.bus.emit(
+                EventType.ENTRY_CONDITION_EVALUATED,
+                payload={"condition": c["name"], "met": c["met"], "detail": c.get("detail")},
+            )
+
+    async def _evaluate_exit_conditions(self, plan) -> None:
+        for c in plan.exit_conditions:
+            await self.bus.emit(
+                EventType.EXIT_CONDITION_EVALUATED,
+                payload={"condition": c["name"], "active": c["active"]},
+            )
+
+    async def _update_holding_duration(self, plan) -> None:
+        await self.bus.emit(
+            EventType.HOLDING_DURATION_UPDATED,
+            payload={"expected_minutes": plan.expected_holding_minutes, "maximum_minutes": plan.maximum_holding_minutes},
+        )
+
     def payload(self) -> dict:
         """Full dashboard payload (sanitized)."""
         data = self.state.to_payload()
@@ -2077,6 +2192,16 @@ class TradingEngine:
         data["coverage"] = dict(self.coverage)
         data["recovery"] = dict(self.recovery)
         data["readiness"] = self.readiness()
+        # Phase D: decision state
+        data["freshness_policy"] = self.freshness_policy.config.model_dump(mode="json")
+        data["timeframe_selection"] = (
+            dataclasses.asdict(self._timeframe_selection)
+            if self._timeframe_selection
+            else None
+        )
+        data["trade_plan"] = (
+            self._trade_plan.model_dump(mode="json") if self._trade_plan else None
+        )
         return data
 
     @property

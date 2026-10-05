@@ -216,6 +216,27 @@ def create_router() -> APIRouter:
         runtime = _runtime(request)
         return sanitized_config(runtime.config, runtime.env)
 
+    # -- Phase D: decision observability -----------------------------------
+    @router.get("/api/decision")
+    async def decision(request: Request):
+        runtime = _runtime(request)
+        payload = runtime.engine.payload()
+        return {
+            "freshness_policy": payload.get("freshness_policy"),
+            "timeframe_selection": payload.get("timeframe_selection"),
+            "trade_plan": payload.get("trade_plan"),
+        }
+
+    @router.get("/api/trade-plan")
+    async def trade_plan(request: Request):
+        runtime = _runtime(request)
+        return runtime.engine.payload().get("trade_plan")
+
+    @router.get("/api/timeframes")
+    async def timeframes(request: Request):
+        runtime = _runtime(request)
+        return runtime.engine.payload().get("timeframe_selection")
+
     @router.get("/api/stream")
     async def stream(request: Request):
         runtime = _runtime(request)

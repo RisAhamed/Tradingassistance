@@ -54,6 +54,10 @@
     <section><h2>Orders</h2><pre id="orders">loading…</pre></section>
     <section><h2>Session</h2><pre id="sess">loading…</pre></section>
     <section><h2>AI Supervisor</h2><pre id="ai">loading…</pre></section>
+    <!-- Phase D -->
+    <section><h2>Freshness Policy</h2><pre id="freshness">loading…</pre></section>
+    <section><h2>Timeframe Selection</h2><pre id="timeframes">loading…</pre></section>
+    <section><h2>TradePlan</h2><pre id="tradeplan">loading…</pre></section>
     <section><h2>Live events (SSE)</h2><div id="stream">connecting…</div></section>
   </main>
   <script>
@@ -66,12 +70,12 @@
     }
     async function refresh() {
       try {
-        const [health, system, market, mdata, warm, exec, ready, features, regime, strategy, risk, positions, pnl, orders, session, ai] =
+        const [health, system, market, mdata, warm, exec, ready, features, regime, strategy, risk, positions, pnl, orders, session, ai, decision] =
           await Promise.all([
             get("/health"), get("/api/system/status"), get("/api/market/latest"), get("/api/market/status"),
             get("/api/warmup"), get("/api/execution"), get("/api/readiness"),
             get("/api/features"), get("/api/regime"), get("/api/strategy/status"), get("/api/risk/status"), get("/api/positions"),
-            get("/api/pnl"), get("/api/orders"), get("/api/session"), get("/api/ai/status"),
+            get("/api/pnl"), get("/api/orders"), get("/api/session"), get("/api/ai/status"), get("/api/decision"),
           ]);
         $("health").textContent = "health: " + health.status + (health.ready ? " (ready)" : " (not ready)");
         $("health").className = "banner " + (health.status === "healthy" ? "ok" : health.status === "warning" ? "warn" : "err");
@@ -98,6 +102,10 @@
         show("features", features); show("regime", regime);
         show("strategy", strategy); show("risk", risk); show("position", positions);
         show("pnl", pnl); show("orders", orders); show("sess", session); show("ai", ai);
+        // Phase D
+        show("freshness", decision.freshness_policy);
+        show("timeframes", decision.timeframe_selection);
+        show("tradeplan", decision.trade_plan);
         $("session").textContent = "session: " + (((session || {}).session || {}).state || "…");
       } catch (err) { $("health").textContent = "health: api unavailable (" + err.message + ")"; }
     }

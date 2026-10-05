@@ -99,6 +99,19 @@ class EventType(str, Enum):
     SYSTEM_ERROR = "SystemError"
     SYSTEM_READY = "SystemReady"
     ALERT = "Alert"
+    # Phase D — decision observability
+    FRESHNESS_EVALUATED = "FreshnessEvaluated"
+    FRESHNESS_CHANGED = "FreshnessChanged"
+    TIMEFRAME_SELECTION_STARTED = "TimeframeSelectionStarted"
+    TIMEFRAME_SELECTED = "TimeframeSelected"
+    TIMEFRAME_SELECTION_BLOCKED = "TimeframeSelectionBlocked"
+    TRADE_PLAN_CREATED = "TradePlanCreated"
+    TRADE_PLAN_UPDATED = "TradePlanUpdated"
+    TRADE_PLAN_INVALIDATED = "TradePlanInvalidated"
+    ENTRY_CONDITION_EVALUATED = "EntryConditionEvaluated"
+    EXIT_CONDITION_EVALUATED = "ExitConditionEvaluated"
+    HOLDING_DURATION_UPDATED = "HoldingDurationUpdated"
+    DECISION_BLOCKED = "DecisionBlocked"
 
 
 class Event(BaseModel):

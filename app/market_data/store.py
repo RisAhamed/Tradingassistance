@@ -1,13 +1,18 @@
 """In-memory market store: latest snapshots and rolling candle history.
 
 Data freshness is derived here so stale data can block new entries.
+Phase D: per-stream (bar / quote / trade) timestamps for
+cadence-aware freshness.
 """
 from __future__ import annotations
 
 from collections import deque
 from datetime import datetime
+from typing import Literal
 
 from app.domain.market import Candle, MarketSnapshot, Quote, Trade
+
+StreamKind = Literal["bar", "quote", "trade"]
 
 
 class MarketStore:
@@ -17,6 +22,8 @@ class MarketStore:
         self._snapshots: dict[str, MarketSnapshot] = {}
         self._candles: dict[str, dict[str, deque[Candle]]] = {}
         self._last_message_at: dict[str, datetime] = {}
+        # Phase D: per-stream last-received timestamps.
+        self._stream_at: dict[tuple[str, StreamKind], datetime] = {}
 
     # -- ingestion ----------------------------------------------------------
     def update_quote(self, quote: Quote) -> MarketSnapshot:
@@ -28,6 +35,7 @@ class MarketStore:
         snapshot.timestamp = quote.timestamp
         self._snapshots[quote.symbol] = snapshot
         self._last_message_at[quote.symbol] = quote.timestamp
+        self._stream_at[(quote.symbol, "quote")] = quote.timestamp
         return snapshot
 
     def update_trade(self, trade: Trade) -> MarketSnapshot:
@@ -39,12 +47,14 @@ class MarketStore:
         snapshot.timestamp = trade.timestamp
         self._snapshots[trade.symbol] = snapshot
         self._last_message_at[trade.symbol] = trade.timestamp
+        self._stream_at[(trade.symbol, "trade")] = trade.timestamp
         return snapshot
 
     def add_candle(self, candle: Candle) -> None:
         per_symbol = self._candles.setdefault(candle.symbol, {})
         series = per_symbol.setdefault(candle.timeframe, deque(maxlen=self.max_candles))
         series.append(candle)
+        self._stream_at[(candle.symbol, "bar")] = candle.timestamp
 
     def upsert_candle(self, candle: Candle) -> None:
         """Insert or replace the in-progress candle for a bucket.
@@ -61,6 +71,7 @@ class MarketStore:
         if series and candle.timestamp < series[-1].timestamp:
             return
         series.append(candle)
+        self._stream_at[(candle.symbol, "bar")] = candle.timestamp
 
     def replace_candles(self, symbol: str, timeframe: str, candles: list[Candle]) -> None:
         """Replace a whole candle series (used by recovery/rebuild)."""
@@ -81,14 +92,29 @@ class MarketStore:
     def last_message_at(self, symbol: str) -> datetime | None:
         return self._last_message_at.get(symbol)
 
+    def stream_last_at(self, symbol: str, stream: StreamKind) -> datetime | None:
+        return self._stream_at.get((symbol, stream))
+
     def data_age(self, symbol: str, now: datetime) -> float | None:
         last = self._last_message_at.get(symbol)
         if last is None:
             return None
         return (now - last).total_seconds()
 
+    def stream_age(self, symbol: str, stream: StreamKind, now: datetime) -> float | None:
+        last = self._stream_at.get((symbol, stream))
+        if last is None:
+            return None
+        return (now - last).total_seconds()
+
     def is_stale(self, symbol: str, now: datetime, max_age_seconds: float) -> bool:
         age = self.data_age(symbol, now)
+        return age is None or age > max_age_seconds
+
+    def is_stream_stale(
+        self, symbol: str, stream: StreamKind, now: datetime, max_age_seconds: float
+    ) -> bool:
+        age = self.stream_age(symbol, stream, now)
         return age is None or age > max_age_seconds
 
     def has_candles(self, symbol: str, timeframe: str, minimum: int) -> bool:
