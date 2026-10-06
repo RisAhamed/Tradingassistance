@@ -150,6 +150,10 @@ strategy:
   enabled: true
   name: breakout_momentum
   version: "1.0"
+  # BTC/USD spot validation is LONG ONLY (Alpaca spot crypto has no short
+  # counterpart). Generic short simulation remains supported by the engine
+  # for future short-capable markets (default: [long, short]).
+  allowed_directions: [long]
   breakout:
     lookback_periods: 20
     buffer_percent: 0.05      # price must exceed range by this %

@@ -7,10 +7,26 @@ from __future__ import annotations
 
 import csv
 import random
+import re
 from datetime import datetime, timedelta
 
 from app.core.clock import floor_to_timeframe, timeframe_seconds, utcnow
 from app.domain.market import Candle
+
+_TIMEFRAME_RE = re.compile(r"^(?P<amount>\d+)(?P<unit>[mhdw])$")
+
+
+def _parse_timeframe(value: str) -> tuple[int, str]:
+    """Split a clock-style timeframe (e.g. ``5m``) into amount and unit."""
+    match = _TIMEFRAME_RE.match(value.strip().lower())
+    if not match:
+        raise ValueError(
+            f"invalid timeframe '{value}' (expected e.g. 1m, 5m, 15m, 1h, 1d)"
+        )
+    amount = int(match.group("amount"))
+    if amount <= 0:
+        raise ValueError(f"invalid timeframe '{value}' (amount must be positive)")
+    return amount, match.group("unit")
 
 
 def generate_history(
@@ -95,15 +111,21 @@ async def fetch_alpaca_bars(
 
     from alpaca.data.historical import CryptoHistoricalDataClient
     from alpaca.data.requests import CryptoBarsRequest
-    from alpaca.data.timeframe import TimeFrame
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
     start = start or (utcnow() - timedelta(days=7))
     end = end or utcnow()
     client = CryptoHistoricalDataClient(api_key, api_secret)
 
+    # Parse the requested timeframe string (e.g. "5m", "1h", "1d") instead of
+    # hard-coding 1m — previously 5m requests silently returned 1m bars.
+    amount, unit = _parse_timeframe(timeframe)
+    tf_unit = {"m": TimeFrameUnit.Minute, "h": TimeFrameUnit.Hour, "d": TimeFrameUnit.Day, "w": TimeFrameUnit.Week}[unit]
+    alpaca_tf = TimeFrame(amount, tf_unit)
+
     def _fetch():
         request = CryptoBarsRequest(
-            symbol_or_symbols=symbol, timeframe=TimeFrame.Minute, start=start, end=end
+            symbol_or_symbols=symbol, timeframe=alpaca_tf, start=start, end=end
         )
         return client.get_crypto_bars(request)
 

@@ -348,6 +348,10 @@ class StrategyConfig(_Section):
     enabled: bool = True
     name: str = "breakout_momentum"
     version: str = "1.0"
+    # Directions the execution seam may open. BTC/USD spot validation is
+    # LONG ONLY (Alpaca spot has no short counterpart); generic short
+    # simulation stays available for future short-capable markets.
+    allowed_directions: list[Literal["long", "short"]] = Field(default_factory=lambda: ["long", "short"])
     breakout: BreakoutConfig = Field(default_factory=BreakoutConfig)
     momentum: MomentumConfig = Field(default_factory=MomentumConfig)
     trend: TrendConfig = Field(default_factory=TrendConfig)
