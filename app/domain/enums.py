@@ -102,6 +102,10 @@ class ReasonCode(str, Enum):
     TREND_CONFIRMED = "trend_confirmed"
     SPREAD_ACCEPTABLE = "spread_acceptable"
     NO_SIGNAL = "no_signal"
+    # VWAP-reversion strategy reasons (additive; existing codes untouched)
+    VWAP_STRETCH = "vwap_stretch"
+    REVERSION_SETUP = "reversion_setup"
+    RANGE_CONTAINED = "range_contained"
 
     # Risk rejection reasons
     RISK_DISABLED = "risk_disabled"

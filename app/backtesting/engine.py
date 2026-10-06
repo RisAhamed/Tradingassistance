@@ -41,7 +41,7 @@ from app.regime.engine import RegimeEngine
 from app.risk.engine import RiskContext, RiskEngine
 from app.signals.generator import SignalGenerator
 from app.strategies.base import StrategyContext
-from app.strategies.breakout_momentum import BreakoutMomentumStrategy
+from app.strategies.registry import build_strategy
 
 logger = logging.getLogger("app.backtesting.engine")
 
@@ -133,7 +133,7 @@ class BacktestEngine:
             fast_period=config.strategy.trend.fast_ema,
             slow_period=config.strategy.trend.slow_ema,
         )
-        strategy = BreakoutMomentumStrategy(config.strategy)
+        strategy = build_strategy(config.strategy)
         self.generator = SignalGenerator(strategy, config.risk)
         self.risk_engine = RiskEngine(
             config.risk,

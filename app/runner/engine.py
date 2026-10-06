@@ -70,7 +70,7 @@ from app.accounting.ledger import FillLedger
 from app.runner.factories import create_broker, create_provider
 from app.sessions.manager import SessionManager
 from app.strategies.base import StrategyContext
-from app.strategies.breakout_momentum import BreakoutMomentumStrategy
+from app.strategies.registry import build_strategy
 from app.signals.generator import SignalGenerator
 
 logger = logging.getLogger("app.runner.engine")
@@ -138,7 +138,7 @@ class TradingEngine:
         self.regime_engine = RegimeEngine(
             config.regime, fast_period=config.strategy.trend.fast_ema, slow_period=config.strategy.trend.slow_ema
         )
-        strategy = BreakoutMomentumStrategy(config.strategy)
+        strategy = build_strategy(config.strategy)
         self.generator = SignalGenerator(strategy, config.risk)
         self.risk_engine = RiskEngine(
             config.risk,

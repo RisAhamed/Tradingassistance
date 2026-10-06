@@ -102,15 +102,24 @@ async def main() -> int:
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--tag", default="dataset1")
+    parser.add_argument("--strategy", default=None,
+                        help="run-scoped strategy selection (overrides config file value for this run only)")
     args = parser.parse_args()
 
     env = get_env()
     config = load_config(env=env)
+    if args.strategy:
+        # Run-scoped selection only: the repository default is untouched.
+        # Effective values are recorded in the result payload.
+        config.strategy.name = args.strategy
+        config.strategy.version = {"vwap_reversion": "0.1"}.get(args.strategy, config.strategy.version)
     configure_logging(config, env, project_root=PROJECT_ROOT)
     trace = Trace()
 
     trace.write("D.7-R2 START")
     trace.write(f"LOG_DIRECTORY={LOG_ABS_DIR.resolve()}")
+    trace.write(f"STRATEGY={config.strategy.name} v{config.strategy.version} "
+                f"(repo default untouched; selection is run-scoped)")
 
     # ---- safety preflight -------------------------------------------------
     checks = {

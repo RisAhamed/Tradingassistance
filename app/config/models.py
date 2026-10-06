@@ -344,6 +344,15 @@ class CooldownConfig(_Section):
     minutes: int = 5
 
 
+class MeanReversionConfig(_Section):
+    """VWAP-reversion entry thresholds (frozen candidate values, v0.1)."""
+
+    stretch_atr_min: float = 1.0
+    rsi_max_long: float = 35.0
+    recovery_min: float = 0.30
+    volume_ratio_min: float = 0.7
+
+
 class StrategyConfig(_Section):
     enabled: bool = True
     name: str = "breakout_momentum"
@@ -358,6 +367,7 @@ class StrategyConfig(_Section):
     volatility: StrategyVolatilityConfig = Field(default_factory=StrategyVolatilityConfig)
     spread: SpreadConfig = Field(default_factory=SpreadConfig)
     cooldown: CooldownConfig = Field(default_factory=CooldownConfig)
+    mean_reversion: MeanReversionConfig = Field(default_factory=MeanReversionConfig)
 
 class StopLossConfig(_Section):
     enabled: bool = True
