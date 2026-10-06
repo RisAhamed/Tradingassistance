@@ -290,6 +290,9 @@ class FeaturesConfig(_Section):
     rsi: RsiConfig = Field(default_factory=RsiConfig)
     atr: AtrConfig = Field(default_factory=AtrConfig)
     vwap: ToggleConfig = Field(default_factory=ToggleConfig)
+    # True session-anchored VWAP (H1): cumulative typical-price VWAP over the
+    # current UTC session date. Pure window function; no state. Default on.
+    session_vwap: ToggleConfig = Field(default_factory=ToggleConfig)
     volatility: ToggleConfig = Field(default_factory=ToggleConfig)
     volume: ToggleConfig = Field(default_factory=ToggleConfig)
     range: RangeConfig = Field(default_factory=RangeConfig)

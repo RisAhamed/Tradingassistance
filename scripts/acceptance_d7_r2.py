@@ -112,7 +112,7 @@ async def main() -> int:
         # Run-scoped selection only: the repository default is untouched.
         # Effective values are recorded in the result payload.
         config.strategy.name = args.strategy
-        config.strategy.version = {"vwap_reversion": "0.1"}.get(args.strategy, config.strategy.version)
+        config.strategy.version = {"vwap_reversion": "0.1", "session_vwap_reversion": "0.1"}.get(args.strategy, config.strategy.version)
     configure_logging(config, env, project_root=PROJECT_ROOT)
     trace = Trace()
 

@@ -5,6 +5,7 @@ testable numeric features that the regime/strategy layers consume.
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 from app.config.models import FeaturesConfig
@@ -12,6 +13,50 @@ from app.core.clock import utcnow
 from app.domain.features import FeatureSnapshot
 from app.domain.market import Candle, MarketSnapshot
 from app.features import indicators as ind
+
+
+def session_vwap_value(candles: list[Candle]) -> float | None:
+    """Cumulative VWAP over the current UTC session date (H1 anchor).
+
+    Pure function of the passed closed-bar window: bars on the same UTC
+    calendar date as the last bar, up to and including it. The session is
+    the configured Trading GOAT session/day boundary (UTC 00:00 → 23:59),
+    so a date change is a hard reset with no carry across sessions.
+
+    Fail-closed contract (no fabricated fair value):
+      - zero total session volume → None (deliberately NO unweighted-mean
+        fallback — unlike the rolling ``ind.vwap``);
+      - negative volume, NaN/inf price or volume → None;
+      - timezone-naive timestamps are treated as UTC (CSV loader convention);
+      - missing bars are ignored, never interpolated; repeated timestamps
+        are not deduplicated here (uniqueness is an upstream data-quality
+        guarantee in both live and backtest paths).
+    """
+    if not candles:
+        return None
+    day = candles[-1].timestamp.date()
+    session = [c for c in candles if c.timestamp.date() == day]
+    if not session:
+        return None
+    for bar in session:
+        if not (
+            math.isfinite(bar.high)
+            and math.isfinite(bar.low)
+            and math.isfinite(bar.close)
+            and math.isfinite(bar.volume)
+        ):
+            return None
+        if bar.volume < 0:
+            return None
+    total_volume = sum(bar.volume for bar in session)
+    if total_volume <= 0:
+        return None
+    return ind.vwap(
+        [bar.high for bar in session],
+        [bar.low for bar in session],
+        [bar.close for bar in session],
+        [bar.volume for bar in session],
+    )
 
 
 class FeatureEngine:
@@ -61,6 +106,9 @@ class FeatureEngine:
             values["vwap"] = ind.vwap(
                 highs[-window:], lows[-window:], closes[-window:], volumes[-window:]
             )
+
+        if self.config.session_vwap.enabled:
+            values["session_vwap"] = session_vwap_value(candles)
 
         prior_highs = highs[:-1] if len(highs) > 1 else highs
         prior_lows = lows[:-1] if len(lows) > 1 else lows

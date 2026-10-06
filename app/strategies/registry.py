@@ -50,6 +50,10 @@ from app.strategies.breakout_momentum import (  # noqa: E402,E501
 from app.strategies.vwap_reversion import (  # noqa: E402,E501
     VwapReversionStrategy,
 )
+from app.strategies.session_vwap_reversion import (  # noqa: E402,E501
+    SessionVwapReversionStrategy,
+)
 
 register("breakout_momentum")(BreakoutMomentumStrategy)
 register("vwap_reversion")(VwapReversionStrategy)
+register("session_vwap_reversion")(SessionVwapReversionStrategy)

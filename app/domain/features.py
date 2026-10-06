@@ -37,6 +37,11 @@ class FeatureSnapshot(BaseModel):
         return self.values.get("vwap")
 
     @property
+    def session_vwap(self) -> float | None:
+        """True session-anchored VWAP (UTC date cumulative), if computed."""
+        return self.values.get("session_vwap")
+
+    @property
     def range_high(self) -> float | None:
         return self.values.get("range_high")
 

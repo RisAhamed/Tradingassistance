@@ -127,6 +127,8 @@ features:
     period: 14
   vwap:
     enabled: true
+  session_vwap:
+    enabled: true
   volatility:
     enabled: true
   volume:
