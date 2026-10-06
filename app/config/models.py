@@ -441,11 +441,26 @@ class SessionCloseoutConfig(_Section):
     require_position_zero: bool = True
 
 
+class BacktestingExecutionConfig(_Section):
+    """Simulated execution model — every assumption lives here, never in code."""
+
+    spread_percent: float = 0.02
+    slippage_percent: float = 0.05
+    fee_percent: float = 0.25
+    fee_model: Literal["in_kind", "quote"] = "in_kind"
+    partial_fill_enabled: bool = False
+    partial_fill_max_fraction: float = 0.5
+    latency_bars: int = 0
+    entry_price: Literal["close", "next_open"] = "close"
+    exit_price: Literal["stop_target", "close"] = "stop_target"
+
+
 class BacktestingConfig(_Section):
     enabled: bool = True
     initial_capital: float = 100000
     commission: float = 0
     slippage_percent: float = 0.05
+    execution: BacktestingExecutionConfig = Field(default_factory=BacktestingExecutionConfig)
 
 class AiModelConfig(_Section):
     name: str = ""

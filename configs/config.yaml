@@ -226,6 +226,16 @@ backtesting:
   initial_capital: 100000
   commission: 0
   slippage_percent: 0.05
+  execution:
+    spread_percent: 0.02
+    slippage_percent: 0.05
+    fee_percent: 0.25
+    fee_model: in_kind
+    partial_fill_enabled: false
+    partial_fill_max_fraction: 0.5
+    latency_bars: 0
+    entry_price: close
+    exit_price: stop_target
 
 ai:
   enabled: true
