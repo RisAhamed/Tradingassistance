@@ -102,6 +102,36 @@ class PositionManager:
             position.updated_at = fill.timestamp
         return update
 
+    def adjust_signed(
+        self,
+        signed_delta: float,
+        *,
+        price: float | None = None,
+        timestamp: datetime | None = None,
+    ) -> None:
+        """Apply a non-fill quantity adjustment (e.g. in-kind crypto fee).
+
+        ``signed_delta`` uses the fill convention: positive = quantity
+        acquired in the LONG direction. It moves the managed quantity toward
+        the broker-held quantity without touching realized P&L.
+        """
+        position = self.position
+        if position.is_flat or abs(signed_delta) <= 1e-12:
+            return
+        pos_sign = 1.0 if position.direction is Direction.LONG else -1.0
+        new_signed = pos_sign * abs(position.quantity) + signed_delta
+        if abs(new_signed) <= 1e-12:
+            self._flatten(None)
+        elif new_signed * pos_sign < 0:
+            position.direction = Direction.LONG if new_signed > 0 else Direction.SHORT
+            position.quantity = abs(new_signed)
+        else:
+            position.quantity = abs(new_signed)
+        if price is not None:
+            position.current_price = price
+        if timestamp is not None:
+            position.updated_at = timestamp
+
     # -- internals ----------------------------------------------------------
     def _open(
         self,

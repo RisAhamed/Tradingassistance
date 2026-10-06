@@ -12,6 +12,7 @@ from typing import Any
 from app.domain.enums import OrderStatus
 from app.domain.orders import Fill, Order
 from app.domain.positions import Position
+from app.domain.symbols import canonical_symbol
 
 
 @dataclass(slots=True)
@@ -87,10 +88,10 @@ class BrokerAdapter(ABC):
         """
         discrepancies: list[str] = []
         try:
-            broker_positions = {p.symbol: p for p in await self.get_positions() if not p.is_flat}
+            broker_positions = {canonical_symbol(p.symbol): p for p in await self.get_positions() if not p.is_flat}
         except Exception as exc:  # pragma: no cover - defensive
             return [f"broker_position_query_failed: {exc}"]
-        internal_positions = {p.symbol: p for p in internal if not p.is_flat}
+        internal_positions = {canonical_symbol(p.symbol): p for p in internal if not p.is_flat}
         for symbol, position in internal_positions.items():
             broker_position = broker_positions.get(symbol)
             if broker_position is None:

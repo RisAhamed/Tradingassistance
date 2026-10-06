@@ -14,6 +14,7 @@ from app.core.ids import new_fill_id
 from app.domain.enums import Direction, OrderStatus, OrderType, Side
 from app.domain.orders import Fill, Order
 from app.domain.positions import Position
+from app.domain.symbols import canonical_symbol, to_broker_symbol
 
 logger = logging.getLogger("app.brokers.alpaca")
 
@@ -73,11 +74,11 @@ class AlpacaPaperBroker(BrokerAdapter):
             quantity = abs(float(item.qty or 0.0))
             if quantity == 0:
                 continue
-            side = str(getattr(item, "side", "long")).split(".")[-1]
+            side = str(getattr(item, "side", "long")).split(".")[-1].lower()
             positions.append(
                 Position(
                     position_id=f"alpaca::{item.symbol}",
-                    symbol=item.symbol,
+                    symbol=canonical_symbol(item.symbol),
                     direction=Direction.LONG if side == "long" else Direction.SHORT,
                     quantity=quantity,
                     average_entry=float(item.avg_entry_price or 0.0),
@@ -134,7 +135,12 @@ class AlpacaPaperBroker(BrokerAdapter):
             )
             return BrokerExecution(order.order_id, OrderStatus.REJECTED, reject_reason=_clean(str(exc)))
         order.broker_order_id = str(getattr(raw, "id", ""))
-        return self._to_execution(order, raw)
+        # D.5.5: the broker never writes fill accounting into the caller's
+        # Order — that object belongs to the OMS. Only the returned fills (and
+        # the broker view returned by get_order) carry broker truth, otherwise
+        # OMS.apply_fill would add the same quantity a second time and OMS net
+        # would diverge from the broker / ledger / position manager.
+        return self._to_execution(order.model_copy(deep=True), raw)
 
     async def cancel_order(self, order: Order) -> Order:
         if not order.broker_order_id:
@@ -162,8 +168,13 @@ class AlpacaPaperBroker(BrokerAdapter):
         if not order.broker_order_id:
             return order
         raw = await asyncio.to_thread(self._client.get_order_by_id, order.broker_order_id)
-        self._to_execution(order, raw)
-        return order
+        # D.5.5: return an independent BROKER VIEW. Mutating the OMS-owned order
+        # here would overwrite its applied-fill total with the broker's
+        # cumulative total, after which the fill bridge (a DELTA) would be added
+        # on top of it — the classic multi-order divergence.
+        broker_view = order.model_copy(deep=True)
+        self._to_execution(broker_view, raw)
+        return broker_view
 
     async def get_orders(self, *, status: str | None = None) -> list[Order]:
         # D.3: list paper orders through the same paper TradingClient.
@@ -182,7 +193,7 @@ class AlpacaPaperBroker(BrokerAdapter):
             order = Order(
                 order_id=str(getattr(raw, "client_order_id", "") or str(getattr(raw, "id", ""))),
                 client_order_id=str(getattr(raw, "client_order_id", "") or ""),
-                symbol=str(getattr(raw, "symbol", SYMBOL_FALLBACK)),
+                symbol=canonical_symbol(str(getattr(raw, "symbol", SYMBOL_FALLBACK))),
                 side=Side.BUY if str(getattr(raw, "side", "buy")).split(".")[-1].lower() == "buy" else Side.SELL,
                 direction=Direction.LONG,
                 quantity=float(getattr(raw, "qty", 0.0) or 0.0),
@@ -196,7 +207,7 @@ class AlpacaPaperBroker(BrokerAdapter):
 
     async def close_position(self, position: Position) -> BrokerExecution:
         try:
-            raw = await asyncio.to_thread(self._client.close_position, position.symbol)
+            raw = await asyncio.to_thread(self._client.close_position, to_broker_symbol(position.symbol))
         except Exception as exc:  # noqa: BLE001
             return BrokerExecution("", OrderStatus.REJECTED, reject_reason=_clean(str(exc)))
         synthetic = Order(

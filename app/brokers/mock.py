@@ -109,13 +109,17 @@ class MockBroker(BrokerAdapter):
         self._cash += -notional if order.side is Side.BUY else notional
         self._cash -= fee
 
-        order.status = OrderStatus.FILLED
-        order.filled_quantity = order.quantity
-        order.average_fill_price = fill_price
-        order.broker_order_id = broker_order_id
-        order.submitted_at = fill.timestamp
-        order.updated_at = fill.timestamp
-        self._orders[order.order_id] = order
+        # D.5.5: the broker keeps its OWN view of the order. Writing these
+        # fields onto the caller's Order would double-count the fill, because
+        # OMS.submit applies the very same fills on top of them.
+        broker_view = order.model_copy(deep=True)
+        broker_view.status = OrderStatus.FILLED
+        broker_view.filled_quantity = order.quantity
+        broker_view.average_fill_price = fill_price
+        broker_view.broker_order_id = broker_order_id
+        broker_view.submitted_at = fill.timestamp
+        broker_view.updated_at = fill.timestamp
+        self._orders[order.order_id] = broker_view
         return BrokerExecution(broker_order_id, OrderStatus.FILLED, fills=[fill])
 
     async def cancel_order(self, order: Order) -> Order:

@@ -122,6 +122,7 @@ class EventType(str, Enum):
     FLATTEN_STARTED = "FlattenStarted"
     FLATTEN_ORDER_CREATED = "FlattenOrderCreated"
     FLATTEN_PARTIAL_FILL = "FlattenPartialFill"
+    FLATTEN_INCOMPLETE = "FlattenIncomplete"
     BROKER_POSITION_READ = "BrokerPositionRead"
     BROKER_POSITION_ZERO = "BrokerPositionZero"
     SESSION_FLAT = "SessionFlat"

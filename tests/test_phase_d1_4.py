@@ -119,14 +119,24 @@ async def test_holding_duration_below_max_holds():
         await engine.stop()
 
 
-async def test_holding_duration_at_max_boundary_holds():
+async def test_holding_duration_at_max_boundary_holds(monkeypatch):
     engine = _engine(execution_enabled=True)
     await engine.start()
     try:
         engine.broker.set_price(SYMBOL, 30000.0)
         limit = engine.config.session.max_holding_minutes
-        _inject(engine, 0.5, opened_at=utcnow() - timedelta(minutes=limit))
-        await engine._manage_position(30000.0)
+        # The boundary is EXACT: held == limit must NOT exit (the check is
+        # strictly greater-than). The engine reads utcnow() a few microseconds
+        # after this test stamps opened_at, and wall-clock tick granularity can
+        # advance the measurement past the limit, which made the result depend
+        # on the clock. Freeze the engine clock so the boundary is deterministic.
+        frozen = utcnow()
+        _inject(engine, 0.5, opened_at=frozen - timedelta(minutes=limit))
+        monkeypatch.setattr("app.runner.engine.utcnow", lambda: frozen)
+        try:
+            await engine._manage_position(30000.0)
+        finally:
+            monkeypatch.undo()
         assert engine.position_manager.is_flat is False
         assert engine.oms.all_orders() == []
     finally:

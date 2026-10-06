@@ -427,6 +427,9 @@ class ExecutionConfig(_Section):
     duplicate_order_protection: bool = True
     # D.5: how often the engine polls the broker for fill/order-state updates.
     order_sync_interval_seconds: float = 1.0
+    # D.5.5-R2: bound exit retries so a rejected exit cannot storm the broker.
+    max_exit_attempts: int = 3
+    exit_backoff_seconds: float = 2.0
 
 
 class SessionCloseoutConfig(_Section):

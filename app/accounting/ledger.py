@@ -21,6 +21,7 @@ class LedgerEntry:
     price: float
     timestamp: datetime
     broker_order_id: str | None = None
+    kind: str = "fill"  # "fill" | "adjustment"
 
 
 @dataclass
@@ -41,6 +42,40 @@ class FillLedger:
             price=fill.price, timestamp=fill.timestamp, broker_order_id=fill.broker_fill_id,
         ))
         return fill.quantity if fill.side is Side.BUY else -fill.quantity
+
+    def add_adjustment(
+        self,
+        key: str,
+        symbol: str,
+        signed_delta: float,
+        *,
+        price: float,
+        timestamp: datetime,
+        broker_order_id: str | None = None,
+    ) -> float:
+        """Record a non-fill quantity adjustment (e.g. in-kind crypto fee).
+
+        ``signed_delta`` uses the same sign convention as a fill (positive =
+        quantity acquired in the LONG direction). It keeps the ledger exactly
+        equal to the broker-held quantity instead of diverging.
+        """
+        if key in self._keys:
+            self.duplicates_ignored += 1
+            return 0.0
+        self._keys.add(key)
+        self.entries.append(
+            LedgerEntry(
+                key=key,
+                symbol=symbol,
+                side=Side.BUY if signed_delta >= 0 else Side.SELL,
+                quantity=abs(signed_delta),
+                price=price,
+                timestamp=timestamp,
+                broker_order_id=broker_order_id,
+                kind="adjustment",
+            )
+        )
+        return signed_delta
 
     def net_quantity(self, symbol: str) -> float:
         net = 0.0

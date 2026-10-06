@@ -10,7 +10,7 @@ import logging
 from app.brokers.base import BrokerAdapter, BrokerExecution
 from app.core.clock import utcnow
 from app.core.ids import new_order_id
-from app.domain.enums import OrderStatus
+from app.domain.enums import OrderStatus, Side
 from app.domain.orders import Fill, Order, OrderIntent
 
 logger = logging.getLogger("app.orders.oms")
@@ -29,6 +29,9 @@ class OMS:
         self._submitted: set[str] = set()
         # FILL SAFETY: fill markers already applied per order (idempotency).
         self._applied_fills: dict[str, set[str]] = {}
+        # Accounting view: signed quantity adjustments (e.g. in-kind crypto fee).
+        self._adjustments: list[dict] = []
+        self._applied_adjustments: set[str] = set()
 
     # -- creation -----------------------------------------------------------
     def create(self, intent: OrderIntent) -> Order:
@@ -155,3 +158,36 @@ class OMS:
     def was_submitted(self, client_order_id: str) -> bool:
         order_id = self._by_client_id.get(client_order_id)
         return bool(order_id and order_id in self._submitted)
+
+    # -- accounting view (D.5.5) --------------------------------------------
+    def net_quantity(self, symbol: str) -> float:
+        """Signed net FILLED quantity for ``symbol`` across every tracked order.
+
+        This is the OMS's independent accounting view. It is derived only from
+        fills the OMS actually applied (never from submitted-but-unfilled
+        orders), so it can be compared directly against the FillLedger,
+        the PositionManager and the broker position.
+        """
+        net = 0.0
+        for order in self._orders.values():
+            if order.symbol != symbol or order.filled_quantity <= 0:
+                continue
+            net += order.filled_quantity if order.side is Side.BUY else -order.filled_quantity
+        for adj in self._adjustments:
+            if adj["symbol"] == symbol:
+                net += adj["signed_delta"]
+        return net
+
+    def add_adjustment(self, key: str, symbol: str, signed_delta: float) -> float:
+        """Record a quantity adjustment; idempotent per key. Returns the delta."""
+        if key in self._applied_adjustments:
+            return 0.0
+        self._applied_adjustments.add(key)
+        self._adjustments.append({"key": key, "symbol": symbol, "signed_delta": float(signed_delta)})
+        return signed_delta
+
+    def filled_orders(self, symbol: str) -> list[Order]:
+        return [
+            o for o in self._orders.values()
+            if o.symbol == symbol and o.filled_quantity > 0
+        ]

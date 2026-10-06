@@ -14,6 +14,7 @@ import dataclasses
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -38,6 +39,7 @@ from app.domain.pnl import TradeRecord
 from app.domain.regime import RegimeSnapshot
 from app.domain.risk import RiskDecision
 from app.domain.signals import StrategySignal
+from app.domain.symbols import canonical_symbol
 from app.events.bus import EventBus
 from app.decision.freshness import FreshnessPolicy
 from app.decision.selector import TimeframeSelector, TimeframeSelection
@@ -173,6 +175,9 @@ class TradingEngine:
         self._order_count = 0
         self._entry_order_id: str | None = None
         self._exiting = False
+        self._exit_attempts = 0
+        self._exit_order_id: str | None = None
+        self._last_exit_submitted_at: datetime | None = None
         self._flatten_done = False
         self._flatten_in_progress = False
         self._last_order_sync: datetime | None = None
@@ -335,6 +340,14 @@ class TradingEngine:
     async def _wire(self) -> None:
         self.provider.set_handler(self.on_market_update)
         await self.provider.connect([self.symbol])
+        # D.5.5-R2: the connection completing is not the same as the provider
+        # reporting connected. Give the real (Alpaca WS) provider a bounded
+        # window to report connected before startup proceeds, so the D4
+        # connectivity check is not a startup race artifact.
+        startup_timeout = float(getattr(self.config.market_data, "startup_connect_timeout_seconds", 15.0) or 15.0)
+        deadline = time.monotonic() + startup_timeout
+        while not self.provider.health().connected and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
         if self.execution_enabled:
             await self.broker.connect()
         else:
@@ -1745,7 +1758,15 @@ class TradingEngine:
             system_healthy=self.health.ready(),
             reconciliation_ok=not self._need_reconciliation,
             account_equity=self._account_equity,
-            open_positions=0 if self.position_manager.is_flat else 1,
+            open_positions=(
+                0
+                if self.position_manager.is_flat
+                and not any(
+                    o.direction is Direction.LONG and not o.is_terminal
+                    for o in self.oms.all_orders()
+                )
+                else 1
+            ),
             orders_this_session=self._order_count,
             daily_realized_pnl=self.pnl.daily_realized,
             last_trade_time=self._last_trade_time,
@@ -2228,8 +2249,8 @@ class TradingEngine:
                     price=updated.average_fill_price or 0.0,
                 )
                 self._broker_fill_synced[order.order_id] = updated.filled_quantity
-                if updated.status is OrderStatus.FILLED:
-                    await self.bus.emit(EventType.ORDER_FILLED, payload=updated.model_dump(mode="json"))
+                # D.5.5-R2: ORDER_FILLED is emitted exactly once, from
+                # _apply_fill — never twice for the same broker delta.
                 await self.bus.emit(EventType.POSITION_UPDATED, payload={"order_id": order.order_id, "delta_qty": delta, "price": fill.price})
                 self.oms.apply_fill(order, fill)
                 await self._apply_fill(order, fill, is_exit=(order.direction is Direction.FLAT))
@@ -2242,6 +2263,76 @@ class TradingEngine:
                 order.updated_at = utcnow()
                 self.state.record_order(order)
                 await self.bus.emit(EventType.ORDER_REJECTED if updated.status is OrderStatus.REJECTED else EventType.ORDER_CANCELLED, payload=updated.model_dump(mode="json"))
+
+    async def _align_with_broker_position(self, order, fill) -> None:
+        """Reconcile the managed/tracked quantity to the authoritative broker
+        position after a fill.
+
+        Alpaca paper crypto can charge the commission IN-KIND (requested
+        0.002 BTC filled, 0.001995 BTC credited). Treating requested ==
+        broker-held quantity would diverge every accounting view and make the
+        exit oversized. The observed delta is recorded as an explicit
+        adjustment in FillLedger, OMS, and PositionManager so all four views
+        stay exactly equal. A large, unexplained delta is flagged for
+        reconciliation and NOT silently absorbed as a fee.
+        """
+        if self.broker.name != "alpaca" or not self.execution_enabled:
+            return
+        position = self.position_manager.position
+        if position.is_flat:
+            return
+        pos_sign = 1.0 if position.direction is Direction.LONG else -1.0
+        local_signed = pos_sign * abs(position.quantity)
+        broker_signed: float | None = None
+        for attempt in range(6):
+            try:
+                positions = await self.broker.get_positions()
+            except Exception:  # noqa: BLE001
+                positions = []
+            match = [p for p in positions if canonical_symbol(p.symbol) == canonical_symbol(self.symbol)]
+            if match:
+                p = match[0]
+                broker_signed = p.quantity if p.direction is Direction.LONG else -p.quantity
+            else:
+                broker_signed = 0.0
+            # Wait until the broker read reflects most of the fill before
+            # judging — a still-propagating position must never be treated
+            # as zero (nor judged "not a fee" against a stale read).
+            if abs(local_signed) < 1e-12:
+                settled = abs(broker_signed) <= 1e-12
+            else:
+                settled = abs(broker_signed) >= 0.5 * abs(local_signed)
+            if settled:
+                break
+            if attempt < 5:
+                await asyncio.sleep(0.5)
+        delta = (broker_signed or 0.0) - local_signed
+        if abs(delta) <= 1e-12:
+            return
+        denominator = max(abs(local_signed), abs(broker_signed or 0.0), 1e-12)
+        if abs(delta) > 0.05 * denominator:
+            # Too large to be a fee — that is a real discrepancy.
+            logger.critical(
+                "BROKER/LOCAL POSITION DIVERGENCE NOT A FEE",
+                extra={"structured": {"event": "RECONCILIATION_MISMATCH", "component": "accounting", "local": round(local_signed, 8), "broker": round(broker_signed or 0.0, 8), "delta": round(delta, 8)}},
+            )
+            self._need_reconciliation = True
+            return
+        adj_key = f"adj:{fill.fill_id}"
+        self.fill_ledger.add_adjustment(
+            adj_key, self.symbol, delta,
+            price=fill.price, timestamp=fill.timestamp, broker_order_id=fill.broker_fill_id,
+        )
+        self.oms.add_adjustment(adj_key, self.symbol, delta)
+        self.position_manager.adjust_signed(delta, price=fill.price, timestamp=fill.timestamp)
+        logger.warning(
+            "BROKER POSITION ADJUSTMENT (in-kind fee / broker delta)",
+            extra={"structured": {"event": "POSITION_ALIGNMENT", "component": "accounting", "delta": round(delta, 8), "local_signed": round(local_signed, 8), "broker_signed": round(broker_signed or 0.0, 8)}},
+        )
+        await self.bus.emit(
+            EventType.POSITION_UPDATED,
+            payload={"adjustment_delta": delta, "reason": "broker_alignment", "symbol": self.symbol},
+        )
 
     async def _apply_fill(self, order, fill, *, is_exit: bool = False, exit_reason: str | None = None) -> None:
         # D.5.4: fill is recorded once in the authoritative ledger; downstream
@@ -2278,6 +2369,11 @@ class TradingEngine:
             self._last_trade_time = fill.timestamp
         if update.closed or update.flipped:
             await self._record_closed_trade(fill, prior, update.realized_delta, exit_reason, order)
+
+        # D.5.5-R2: align the tracked quantity with the broker BEFORE emitting
+        # the fill event, so every downstream checkpoint observes the same
+        # broker-held quantity in FillLedger, OMS, PM, and the broker read.
+        await self._align_with_broker_position(order, fill)
 
         logger.info(
             "ORDER FILLED",
@@ -2386,13 +2482,110 @@ class TradingEngine:
             await self._exit(reason)
 
     async def _exit(self, reason: str) -> bool:
-        """Close the current position. Exits are never gated by risk/session."""
+        """Close the current position. Exits are never gated by risk/session.
+
+        Bounded by: one in-flight exit at a time, a max-attempt budget and a
+        backoff between attempts. The quantity is always clamped to the
+        authoritative broker-available position; if that cannot be determined
+        the exit is BLOCKED and a reconciliation flag is raised (fail-closed).
+        """
         position = self.position_manager.position
-        if self._exiting or position.is_flat:
+        if self._exiting:
             return False
+        if position.is_flat:
+            self._exit_attempts = 0
+            self._exit_order_id = None
+            return False
+
+        now = utcnow()
+
+        # A previous exit that is still non-terminal must be awaited, never
+        # duplicated.
+        if self._exit_order_id is not None:
+            previous = self.oms.get(self._exit_order_id)
+            if (
+                previous is not None
+                and not previous.is_terminal
+                # A PARTIALLY_FILLED exit (notably an IOC order that filled only
+                # part of its requested qty) is not "in flight" — the remainder
+                # is explicit in the position and a new bounded exit is
+                # required to finish closing it.
+                and previous.status is not OrderStatus.PARTIALLY_FILLED
+            ):
+                logger.warning(
+                    "EXIT ALREADY IN FLIGHT",
+                    extra={"structured": {"event": "EXIT_RETRY_BLOCKED", "component": "execution", "reason": "in_flight"}},
+                )
+                return False
+
+        max_attempts = int(getattr(self.config.execution, "max_exit_attempts", 3) or 3)
+        backoff = float(getattr(self.config.execution, "exit_backoff_seconds", 2.0) or 2.0)
+        if self._exit_attempts >= max_attempts:
+            logger.critical(
+                "EXIT RETRY LIMIT REACHED",
+                extra={"structured": {"event": "EXIT_RETRY_LIMIT", "component": "execution", "attempts": self._exit_attempts}},
+            )
+            return False
+        # Session closeout drives its own bounded attempt budget and must not
+        # be blocked by the tick-level backoff between normal exits.
+        if reason != "session_flatten" and self._last_exit_submitted_at is not None:
+            elapsed = (now - self._last_exit_submitted_at).total_seconds()
+            if elapsed < backoff:
+                logger.info(
+                    "EXIT BACKOFF",
+                    extra={"structured": {"event": "EXIT_BACKOFF", "component": "execution", "elapsed": round(elapsed, 2), "backoff": backoff}},
+                )
+                return False
+
+        # Authoritative broker-available quantity is REQUIRED for the real
+        # (alpaca adapter): never resubmit an oversized exit that the broker
+        # will reject. Deterministic mocks keep their seam behavior and use the
+        # tracked quantity directly (matching previous test semantics).
+        safe_qty = abs(position.quantity)
+        if self.broker.name == "alpaca":
+            bstatus, bpositions = await self._authoritative_broker_positions()
+            broker_qty: float | None = None
+            if bstatus == "ok":
+                for p in bpositions:
+                    if canonical_symbol(getattr(p, "symbol", "")) == canonical_symbol(self.symbol):
+                        same_direction = (
+                            (position.direction is Direction.LONG and getattr(p, "direction", None) is Direction.LONG)
+                            or (position.direction is Direction.SHORT and getattr(p, "direction", None) is Direction.SHORT)
+                        )
+                        if same_direction:
+                            broker_qty = abs(getattr(p, "quantity", 0.0))
+                        break
+            if broker_qty is None:
+                logger.critical(
+                    "EXIT BLOCKED: BROKER POSITION UNDETERMINED",
+                    extra={"structured": {"event": "EXIT_BLOCKED", "component": "execution", "status": bstatus, "reason": "broker_position_undetermined"}},
+                )
+                self._need_reconciliation = True
+                return False
+
+            if broker_qty < safe_qty - 1e-12:
+                logger.warning(
+                    "EXIT QTY CLAMPED TO BROKER AVAILABLE",
+                    extra={"structured": {"event": "EXIT_QTY_CLAMPED", "component": "execution", "local": safe_qty, "available": broker_qty}},
+                )
+                safe_qty = broker_qty
+            if safe_qty <= 0:
+                logger.critical(
+                    "EXIT BLOCKED: NO BROKER QUANTITY TO CLOSE",
+                    extra={"structured": {"event": "EXIT_BLOCKED", "component": "execution", "reason": "zero_broker_quantity"}},
+                )
+                return False
+        else:
+            # Non-alpaca seams (mock/fake broker): order fills are synchronous
+            # or simulated, and mock reconciliation still verifies final
+            # flatness after flatten. No fail-closed position probe here, to
+            # preserve deterministic mock-broker test semantics.
+            pass
+
         self._exiting = True
+        self._exit_attempts += 1
+        self._last_exit_submitted_at = now
         try:
-            now = utcnow()
             side = Side.SELL if position.direction is Direction.LONG else Side.BUY
             intent = OrderIntent(
                 order_id=new_order_id(),
@@ -2401,7 +2594,7 @@ class TradingEngine:
                 symbol=self.symbol,
                 side=side,
                 direction=Direction.FLAT,
-                quantity=abs(position.quantity),
+                quantity=safe_qty,
                 order_type=self._order_type(),
                 correlation_id=new_correlation_id(),
                 session_id=self.session.session_id,
@@ -2410,6 +2603,7 @@ class TradingEngine:
             order = self.oms.create(intent)
             self.state.record_order(order)
             self._order_count += 1
+            self._exit_order_id = order.order_id
             logger.info(
                 "EXIT REQUESTED",
                 extra={
@@ -2617,7 +2811,11 @@ class TradingEngine:
         closeout = self.config.session_closeout
         attempts = closeout.maximum_flatten_attempts if closeout.retry_flatten else 1
         success = False
+        # D.5.5-R2: session closeout gets a fresh exit attempt budget per flatten.
+        self._exit_attempts = 0
+        self._last_exit_submitted_at = None
         for attempt in range(1, max(1, attempts) + 1):
+            prior_qty = abs(self.position_manager.position.quantity) if not self.position_manager.is_flat else 0.0
             if not self.position_manager.is_flat:
                 await self._exit("session_flatten")
                 for _ in range(10):
@@ -2642,13 +2840,22 @@ class TradingEngine:
             broker_positions = (await self._authoritative_broker_positions())[1]
             if not self.position_manager.is_flat or broker_positions:
                 remaining = abs(self.position_manager.position.quantity)
+                moved = prior_qty - remaining
+                # D.5.5-R2: a partial fill implies real quantity closed; report
+                # it as such. A no-progress attempt is FLATTEN_INCOMPLETE,
+                # never a fill. Both stay visible.
+                if moved > 1e-12:
+                    await self.bus.emit(
+                        EventType.FLATTEN_PARTIAL_FILL,
+                        payload={"attempt": attempt, "remaining_quantity": remaining, "broker_positions": len(broker_positions), "closed_quantity": moved},
+                    )
                 await self.bus.emit(
-                    EventType.FLATTEN_PARTIAL_FILL,
+                    EventType.FLATTEN_INCOMPLETE,
                     payload={"attempt": attempt, "remaining_quantity": remaining, "broker_positions": len(broker_positions)},
                 )
                 logger.warning(
                     "FLATTEN INCOMPLETE",
-                    extra={"structured": {"event": "FLATTEN_PARTIAL_FILL", "component": "session", "attempt": attempt, "remaining": remaining}},
+                    extra={"structured": {"event": "FLATTEN_INCOMPLETE", "component": "session", "attempt": attempt, "remaining": remaining}},
                 )
             success = self.position_manager.is_flat and not broker_positions
             if success:
