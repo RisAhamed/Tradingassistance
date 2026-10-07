@@ -227,6 +227,17 @@ execution:
     max_reconcile_attempts: 3
   duplicate_order_protection: true
 
+paper_safety:
+  # GAP-1: independent paper-experiment safety cap (rejection-only).
+  # Disabled by default: order flow is then exactly unchanged. Enable only
+  # for explicitly approved, run-scoped paper experiments. Values are part
+  # of the run configuration hash. Exits always bypass (flatten-safe).
+  enabled: false
+  max_qty_per_order: 0.001
+  max_open_qty: 0.001
+  max_orders_per_session: 3
+  max_notional_exposure: 150.0
+
 session_closeout:
   enabled: true
   flatten_all_positions: true

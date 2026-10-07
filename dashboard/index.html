@@ -38,6 +38,21 @@
     <button data-action="reconcile">Reconcile</button>
     <span id="ctl-msg" class="banner">controls call the same command layer as AI actions</span>
   </div>
+  <section style="margin:12px 20px 0"><h2>Experiment (controlled paper)</h2>
+    <div class="row">
+      <span class="banner" id="exp-state">experiment: .</span>
+      <span class="banner" id="exp-countdown"></span>
+      <button data-exp="halt" style="border-color:var(--err)">HALT (kill switch)</button>
+    </div>
+    <pre id="exp-envelope">no envelope</pre>
+    <div class="row">
+      <input id="exp-operator" placeholder="operator name" style="background:#0b0e14;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:8px" />
+      <input id="exp-minutes" placeholder="window minutes (5-240)" type="number" min="5" max="240" style="background:#0b0e14;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:8px;width:200px" />
+      <button data-exp="authorize">Authorize</button>
+      <button data-exp="arm">Arm (enable execution)</button>
+    </div>
+    <div id="exp-msg" class="banner">authorization freezes an immutable envelope; arming enables execution only inside it</div>
+  </section>
   <main>
     <section><h2>System</h2><pre id="system">loading…</pre></section>
     <section><h2>Market Data</h2><pre id="mdata">loading…</pre></section>
@@ -120,6 +135,39 @@
         $("session").textContent = "session: " + (((session || {}).session || {}).state || "…");
       } catch (err) { $("health").textContent = "health: api unavailable (" + err.message + ")"; }
     }
+    async function expRefresh() {
+      try {
+        const exp = await get("/api/experiment/status");
+        $("exp-state").textContent = "experiment: " + exp.state + (exp.execution_enabled ? " (EXECUTION ON)" : " (execution off)");
+        $("exp-state").className = "banner " + (exp.state === "running" || exp.state === "armed" ? "warn" : exp.state === "halted" || exp.state === "failed" ? "err" : "");
+        $("exp-countdown").textContent = exp.seconds_remaining == null ? "" : ("window remaining: " + Math.round(exp.seconds_remaining) + "s");
+        show("exp-envelope", exp.envelope || "no envelope — authorize to freeze one");
+      } catch (err) { $("exp-state").textContent = "experiment: api unavailable"; }
+    }
+    document.querySelectorAll("button[data-exp]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const action = btn.getAttribute("data-exp");
+        const box = $("exp-msg");
+        try {
+          let res;
+          if (action === "authorize") {
+            const operator = $("exp-operator").value.trim();
+            const window_minutes = parseInt($("exp-minutes").value, 10);
+            if (!operator || !(window_minutes >= 5)) { box.textContent = "operator name + window minutes (5-240) required"; return; }
+            if (!confirm("Authorize paper execution inside the frozen envelope? This enables REAL paper orders.")) return;
+            res = await fetch("/api/experiment/authorize", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ operator, window_minutes }) });
+          } else if (action === "arm") {
+            if (!confirm("Arm execution now? Orders may be submitted inside the authorized window.")) return;
+            res = await fetch("/api/experiment/arm", { method: "POST" });
+          } else if (action === "halt") {
+            res = await fetch("/api/experiment/halt", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ reason: "operator_halt", operator: "human" }) });
+          }
+          box.textContent = action + ": " + res.status + " " + (await res.text()).slice(0, 300);
+          await expRefresh(); await refresh();
+        } catch (err) { box.textContent = action + " failed: " + err.message; }
+      });
+    });
+    expRefresh(); setInterval(expRefresh, 2000);
     document.querySelectorAll("button[data-action]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const action = btn.getAttribute("data-action");

@@ -53,7 +53,11 @@ from app.strategies.vwap_reversion import (  # noqa: E402,E501
 from app.strategies.session_vwap_reversion import (  # noqa: E402,E501
     SessionVwapReversionStrategy,
 )
+from app.strategies.range_edge_rejection import (  # noqa: E402,E501
+    RangeEdgeRejectionStrategy,
+)
 
 register("breakout_momentum")(BreakoutMomentumStrategy)
 register("vwap_reversion")(VwapReversionStrategy)
 register("session_vwap_reversion")(SessionVwapReversionStrategy)
+register("range_edge_rejection")(RangeEdgeRejectionStrategy)

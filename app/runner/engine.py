@@ -47,6 +47,8 @@ from app.decision.trade_plan import TradePlanBuilder
 from app.domain.trade_plan import TradePlan, TradePlanStatus
 from app.events.types import EventType
 from app.execution.executor import ExecutionResult, OrderExecutor
+from app.experiment.manager import ExperimentManager, ExperimentState
+from app.safety.paper_cap import PaperSafetyCap
 from app.features.engine import FeatureEngine
 from app.market_data.aggregator import CandleAggregator
 from app.market_data.base import MarketDataProvider, MarketUpdate
@@ -151,6 +153,14 @@ class TradingEngine:
         )
         self.oms = OMS(self.broker, duplicate_protection=config.execution.duplicate_order_protection)
         self.executor = OrderExecutor(self.oms)
+        # GAP-1: independent paper-experiment safety cap. Rejection-only,
+        # enforced at the single submission funnel below. Inactive by default.
+        self.paper_cap = PaperSafetyCap(config.paper_safety, trading_mode=config.trading.mode)
+        # Controlled experiment lifecycle (observation/authorization/arming).
+        self.experiment = ExperimentManager(config, run_id=new_correlation_id())
+        self._experiment_seen_orders: set[str] = set()
+        self._experiment_was_fresh = True
+        self._experiment_halted = False
         self.position_manager = PositionManager(self.symbol)
         self.pnl = PnlEngine(self.symbol, starting_equity=0.0)
         self.session = SessionManager(config.session, config.session_closeout)
@@ -468,6 +478,15 @@ class TradingEngine:
             )
 
         session_id = self.session.start(utcnow())
+        # Controlled experiment: startup enters observation (never armed).
+        self.experiment.mark_observing()
+        # GAP-1: paper-cap session counters reset with each new session.
+        self.paper_cap.reset_session()
+        caps = self.paper_cap.describe()
+        logger.info(
+            "PAPER SAFETY CAPS",
+            extra={"structured": {"event": "PAPER_SAFETY_CAPS", "component": "safety", **caps}},
+        )
         await self.bus.emit(
             EventType.SESSION_STARTED,
             payload={"session_id": session_id, "symbol": self.symbol},
@@ -1954,6 +1973,10 @@ class TradingEngine:
         # strategy, aggregator, and AI tools all call _handle_signal, which
         # evaluates RiskEngine and only reaches _submit_entry on approval.
         # There is no alternate order-creation path for entries.
+        if self._experiment_halted:
+            # Post-halt: no new entries, even risk-approved ones. Flatten-only.
+            await self._record_execution_failure(signal, "experiment_halted")
+            return
         now = utcnow()
         price = self.state.latest_snapshot.price if self.state.latest_snapshot else None
         max_notional = self._account_equity * (self.config.risk.maximum_position_value_percent / 100.0)
@@ -2130,6 +2153,37 @@ class TradingEngine:
                 payload={"order_id": order.order_id, "reason": "execution_disabled"},
             )
             return False
+        # GAP-1: paper safety cap — downstream of strategy/risk/sizing, at the
+        # single funnel. Rejection only (never clips); exits bypass so a
+        # flatten can never be blocked by experimental limits.
+        if not is_exit:
+            position = self.position_manager.position
+            open_qty = abs(position.quantity) if not position.is_flat else 0.0
+            reference_price = getattr(order, "limit_price", None) or (
+                self.state.latest_snapshot.price if self.state.latest_snapshot else None
+            )
+            decision = self.paper_cap.check(
+                order_id=order.order_id,
+                quantity=order.quantity,
+                price=reference_price or 0.0,
+                is_entry=True,
+                open_qty=open_qty,
+            )
+            if not decision.allowed:
+                order.status = OrderStatus.REJECTED
+                order.reject_reason = f"paper_cap:{decision.reason}"
+                order.updated_at = utcnow()
+                logger.critical(
+                    "PAPER CAP REJECTED ORDER",
+                    extra={"structured": {"event": "PAPER_CAP_REJECTED", "component": "safety",
+                                          "order_id": order.order_id, "reason": decision.reason,
+                                          "detail": decision.detail}},
+                )
+                self.state.record_order(order)
+                await self.bus.emit(EventType.ORDER_REJECTED,
+                                    payload={"order_id": order.order_id, "reason": f"paper_cap:{decision.reason}"})
+                return False
+            self.paper_cap.note_submitted(order.order_id)
         try:
             result: ExecutionResult = await self.executor.submit(order)
         except OrderRejected as exc:
@@ -2893,7 +2947,117 @@ class TradingEngine:
         return success
 
     # -- periodic tick ------------------------------------------------------
+    async def halt_experiment(self, reason: str, *, operator: str = "system") -> None:
+        """Safety halt: stop entries, flatten, disarm, terminal state.
+
+        Kill chain order matters: entries stop FIRST (flag), then flatten
+        while execution is still on, then disarm. No re-arm afterwards.
+        """
+        self._experiment_halted = True
+        logger.critical(
+            "SAFETY KILL",
+            extra={"structured": {"event": "SAFETY_KILL", "component": "experiment",
+                                  "reason": reason, "operator": operator}},
+        )
+        await self.bus.emit(EventType.SAFETY_KILL,
+                            payload={"reason": reason, "operator": operator})
+        await self.bus.emit(EventType.EXPERIMENT_HALTED, payload={"reason": reason})
+        # Flatten is idempotent: with nothing open it only verifies flatness,
+        # including broker-side positions local books do not track (D.4).
+        await self.flatten(force=True, session_closeout=False)
+        self.experiment.halt(reason)
+
+    def _experiment_ready(self, now: datetime) -> bool:
+        """Promotion gate OBSERVING -> READY_FOR_AUTHORIZATION (read-only)."""
+        try:
+            if self.warmup.get("status") != "completed":
+                return False
+            if self.session.state is not SessionState.TRADING:
+                return False
+            fp = self.freshness_policy
+            bar_expected = timeframe_minutes(self.config.market_data.bars.timeframe) * 60
+            bar_result = fp.evaluate(source="bar", last_received=self._last_bar_at,
+                                     now=now, expected_interval_seconds=bar_expected)
+            if bar_result.is_stale:
+                return False
+            if not self.state.reconciliation.get("ok", False):
+                return False
+            return True
+        except Exception:  # noqa: BLE001 - promotion is advisory; fail toward observing
+            return False
+
+    async def _experiment_tripwire_snapshot(self) -> dict:
+        """Safety snapshot for kill evaluation.
+
+        Broker truth is queried ONLY while already unreconciled (suspect
+        state): broker-side exposure unknown locally is the kill-worthy case
+        (e.g. position opened outside this process). A failed verification
+        query itself fails closed. No polling in the healthy path.
+        """
+        caps = self.config.paper_safety
+        breach = None
+        if caps.enabled:
+            for order in self.oms.all_orders():
+                if order.status is OrderStatus.NEW or order.status is OrderStatus.SUBMITTED:
+                    opening = ((order.direction is Direction.LONG and order.side is Side.BUY)
+                               or (order.direction is Direction.SHORT and order.side is Side.SELL))
+                    if opening and order.quantity > caps.max_qty_per_order:
+                        breach = f"order_over_cap:{order.order_id}"
+                        break
+            if breach is None and self.paper_cap.entries_this_session > caps.max_orders_per_session:
+                breach = "orders_over_cap"
+        order_ids = [o.order_id for o in self.oms.all_orders()]
+        duplicate = len(order_ids) != len(set(order_ids))
+        reconciled = not self._need_reconciliation
+        has_exposure = not self.position_manager.is_flat
+        broker_unverifiable = False
+        if not reconciled:
+            try:
+                broker_positions = await self.broker.get_positions()
+                has_exposure = has_exposure or any(not p.is_flat for p in broker_positions)
+            except Exception:  # noqa: BLE001 - unverifiable broker state fails closed
+                broker_unverifiable = True
+        return {
+            "paper_mode": self.config.trading.mode == "paper",
+            "cap_breach": breach,
+            "reconciliation_ok": reconciled,
+            "has_exposure": has_exposure,
+            "open_orders": len(self.oms.open_orders()),
+            "duplicate_order": duplicate,
+            "broker_unverifiable": broker_unverifiable,
+            "ambiguous_unresolved": self._need_reconciliation and (
+                has_exposure or bool(self.oms.open_orders())),
+            "stale_entry_attempted": False,
+        }
+
+    async def _experiment_tick(self, now: datetime) -> None:
+        """Per-tick experiment supervision. Never places orders."""
+        manager = self.experiment
+        if manager.state is ExperimentState.OBSERVING and self._experiment_ready(now):
+            manager.mark_ready_for_authorization()
+        if manager.state is ExperimentState.ARMED:
+            manager.mark_running()
+            await self.bus.emit(EventType.EXPERIMENT_RUNNING,
+                                payload={"run_id": manager.run_id})
+        if manager.state not in (ExperimentState.ARMED, ExperimentState.RUNNING):
+            return
+        if manager.check_expiry(now):
+            await self.bus.emit(EventType.EXPERIMENT_EXPIRED,
+                                payload={"run_id": manager.run_id})
+            # Flatten BEFORE disarm: exits need execution on; the tick is
+            # atomic with respect to new entries.
+            await self.flatten(force=True, session_closeout=False)
+            manager.disarm(reason="window_expired")
+            manager.complete()
+            await self.bus.emit(EventType.EXPERIMENT_COMPLETED,
+                                payload={"run_id": manager.run_id})
+            return
+        reason = manager.evaluate_tripwires(await self._experiment_tripwire_snapshot())
+        if reason is not None:
+            await self.halt_experiment(reason)
+
     async def tick(self, now: datetime) -> None:
+        await self._experiment_tick(now)
         previous = self.session.state
         previous_entries = self.session.entries_allowed
         state = self.session.update(now)

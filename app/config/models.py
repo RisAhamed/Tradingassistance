@@ -683,6 +683,24 @@ class TestingConfig(_Section):
     outage: OutageConfig = Field(default_factory=OutageConfig)
 
 
+class PaperSafetyConfig(_Section):
+    """Independent paper-experiment safety cap (GAP-1).
+
+    A rejection-only gate enforced downstream of strategy, risk, and sizing
+    at the single order-submission funnel. It can only ever RESTRICT order
+    flow: there is no code path by which it increases, scales, or authorizes
+    any quantity, nor does it gate live trading (paper mode is required and
+    re-verified on every check). ``enabled=False`` (default) leaves order
+    flow exactly as before; the configured values remain visible and hashed.
+    """
+
+    enabled: bool = False
+    max_qty_per_order: float = 0.001
+    max_open_qty: float = 0.001
+    max_orders_per_session: int = 3
+    max_notional_exposure: float = 150.0
+
+
 class AppConfig(_Section):
     """Root configuration object (everything from configs/config.yaml)."""
 
@@ -697,6 +715,7 @@ class AppConfig(_Section):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     position_sizing: PositionSizingConfig = Field(default_factory=PositionSizingConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    paper_safety: PaperSafetyConfig = Field(default_factory=PaperSafetyConfig)
     session_closeout: SessionCloseoutConfig = Field(default_factory=SessionCloseoutConfig)
     backtesting: BacktestingConfig = Field(default_factory=BacktestingConfig)
     ai: AiConfig = Field(default_factory=AiConfig)

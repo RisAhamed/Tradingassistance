@@ -106,6 +106,9 @@ class ReasonCode(str, Enum):
     VWAP_STRETCH = "vwap_stretch"
     REVERSION_SETUP = "reversion_setup"
     RANGE_CONTAINED = "range_contained"
+    # Range-edge-rejection strategy reasons (additive; existing codes untouched)
+    RANGE_EDGE_TOUCH = "range_edge_touch"
+    EDGE_REJECTION = "edge_rejection"
 
     # Risk rejection reasons
     RISK_DISABLED = "risk_disabled"

@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.config.loader import PROJECT_ROOT, sanitized_config
+from app.events.types import EventType
 
 logger = logging.getLogger("app.api")
 
@@ -403,6 +404,74 @@ def create_router() -> APIRouter:
         runtime = _runtime(request)
         ok = await runtime.engine.request_reconciliation(source="human")
         return {"reconciled": ok, "reconciliation": runtime.engine.state.reconciliation}
+
+    # -- controlled experiment (authorization + supervision surface) ---------
+    @router.get("/api/experiment/status")
+    async def experiment_status(request: Request):
+        from app.core.clock import utcnow as _now
+
+        runtime = _runtime(request)
+        return runtime.engine.experiment.snapshot(now=_now())
+
+    @router.post("/api/experiment/authorize")
+    async def experiment_authorize(request: Request):
+        from app.core.clock import utcnow as _now
+        from app.experiment.manager import ExperimentError
+
+        runtime = _runtime(request)
+        body = await request.json()
+        operator = (body.get("operator") or "").strip()
+        try:
+            window_minutes = int(body.get("window_minutes", 0))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="window_minutes must be an integer")
+        engine = runtime.engine
+        try:
+            envelope = engine.experiment.authorize(operator=operator, window_minutes=window_minutes)
+        except ExperimentError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        logger.warning(
+            "experiment authorized",
+            extra={"structured": {"event": "EXPERIMENT_AUTHORIZED", "component": "api",
+                                  "operator": envelope.operator,
+                                  "window_minutes": envelope.window_minutes,
+                                  "run_id": envelope.run_id}},
+        )
+        await runtime.engine.bus.emit(
+            EventType.EXPERIMENT_AUTHORIZED,
+            payload={"operator": envelope.operator, "run_id": envelope.run_id},
+        )
+        return {"authorized": True, "envelope": engine.experiment.snapshot(now=_now())["envelope"]}
+
+    @router.post("/api/experiment/arm")
+    async def experiment_arm(request: Request):
+        from app.experiment.manager import ExperimentError
+
+        runtime = _runtime(request)
+        engine = runtime.engine
+        try:
+            engine.experiment.arm()
+        except ExperimentError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        logger.warning(
+            "experiment armed",
+            extra={"structured": {"event": "EXPERIMENT_ARMED", "component": "api",
+                                  "run_id": engine.experiment.run_id}},
+        )
+        await engine.bus.emit(
+            EventType.EXPERIMENT_ARMED,
+            payload={"run_id": engine.experiment.run_id},
+        )
+        return {"armed": True, "execution_enabled": engine.execution_enabled}
+
+    @router.post("/api/experiment/halt")
+    async def experiment_halt(request: Request):
+        runtime = _runtime(request)
+        body = await request.json()
+        reason = str(body.get("reason") or "operator_halt")
+        operator = str(body.get("operator") or "human")
+        await runtime.engine.halt_experiment(reason, operator=operator)
+        return {"halted": True, "state": runtime.engine.experiment.state.value}
 
     # -- dashboard ----------------------------------------------------------
     @router.get("/dashboard")

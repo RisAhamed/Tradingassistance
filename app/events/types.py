@@ -129,6 +129,14 @@ class EventType(str, Enum):
     SESSION_CLOSED = "SessionClosed"
     SESSION_CLOSEOUT_FAILED = "SessionCloseoutFailed"
     SESSION_HALTED = "SessionHalted"
+    # Controlled experiment lifecycle (additive; existing events untouched)
+    EXPERIMENT_AUTHORIZED = "ExperimentAuthorized"
+    EXPERIMENT_ARMED = "ExperimentArmed"
+    EXPERIMENT_RUNNING = "ExperimentRunning"
+    EXPERIMENT_EXPIRED = "ExperimentExpired"
+    EXPERIMENT_HALTED = "ExperimentHalted"
+    EXPERIMENT_COMPLETED = "ExperimentCompleted"
+    SAFETY_KILL = "SafetyKill"
 
 
 class Event(BaseModel):
