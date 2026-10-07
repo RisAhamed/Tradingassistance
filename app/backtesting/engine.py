@@ -133,8 +133,13 @@ class BacktestEngine:
             fast_period=config.strategy.trend.fast_ema,
             slow_period=config.strategy.trend.slow_ema,
         )
+        from app.strategies.orchestrator import StrategyOrchestrator
+
         strategy = build_strategy(config.strategy)
         self.generator = SignalGenerator(strategy, config.risk)
+        self.orchestrator = StrategyOrchestrator(config.strategy.selection)
+        self._generator_cache: dict[str, SignalGenerator] = {}
+        self._orch_strategy = strategy
         self.risk_engine = RiskEngine(
             config.risk,
             allow_short=config.execution.allow_short,
@@ -299,7 +304,9 @@ class BacktestEngine:
                     correlation_id=new_correlation_id(),
                 )
                 try:
-                    signal = self.generator.generate(context)
+                    active = self.orchestrator.resolve(regime.regime)
+                    gen = self._generator_cache.setdefault(active.name, SignalGenerator(active, self.config.risk))
+                    signal = gen.generate(context)
                 except Exception:  # noqa: BLE001
                     logger.exception("strategy error during backtest")
                     signal = None

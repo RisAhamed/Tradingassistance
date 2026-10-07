@@ -78,7 +78,8 @@ def create_router() -> APIRouter:
 
     @router.get("/api/strategy/status")
     async def strategy_status(request: Request):
-        return _runtime(request).engine.payload().get("strategy")
+        payload = _runtime(request).engine.payload()
+        return {**payload.get("strategy", {}), "strategy_selection": payload.get("strategy_selection")}
 
     @router.get("/api/risk/status")
     async def risk_status(request: Request):
@@ -97,6 +98,11 @@ def create_router() -> APIRouter:
     async def pnl(request: Request):
         payload = _runtime(request).engine.payload()
         return {"pnl": payload.get("pnl"), "trades": payload.get("trades", [])}
+
+    @router.get("/api/sentiment")
+    async def sentiment(request: Request):
+        """Observation-only sentiment view (sanitized, secret-free)."""
+        return _runtime(request).engine.payload().get("sentiment")
 
     @router.get("/api/events")
     async def events(request: Request, limit: int = 100):

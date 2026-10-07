@@ -17,6 +17,14 @@ class FeatureSnapshot(BaseModel):
     data_age_seconds: float | None = None
     candle_count: int = 0
     values: dict[str, float | None] = Field(default_factory=dict)
+    # Phase E — observation-only sentiment enrichment. Optional, never part
+    # of the ``ready`` required set: sentiment must never block evaluation.
+    sentiment_score: float | None = None
+    sentiment_fear_greed: float | None = None
+    funding_rate: float | None = None
+    open_interest_change_24h: float | None = None
+    sentiment_age_seconds: float | None = None
+    sentiment_stale: bool = False
 
     def get(self, name: str, default: float | None = None) -> float | None:
         return self.values.get(name, default)
@@ -62,7 +70,26 @@ class FeatureSnapshot(BaseModel):
         return self.values.get("volume_ratio")
 
     def numeric_values(self) -> dict[str, float]:
-        return {k: v for k, v in self.values.items() if v is not None}
+        """Core numeric features plus FRESH sentiment observations.
+
+        Staleness rule (Phase E): a sentiment snapshot older than
+        ``sentiment.maximum_age_seconds`` is flagged ``sentiment_stale=True``
+        on the snapshot and is NOT merged into ``values`` — the stale reading
+        stays visible as metadata but never enters the numeric surface that
+        downstream consumers iterate. Missing sentiment likewise contributes
+        nothing (never blocks ``ready``).
+        """
+        out = {k: v for k, v in self.values.items() if v is not None}
+        if not self.sentiment_stale:
+            if self.sentiment_score is not None:
+                out["sentiment_score"] = self.sentiment_score
+            if self.sentiment_fear_greed is not None:
+                out["sentiment_fear_greed"] = self.sentiment_fear_greed
+            if self.funding_rate is not None:
+                out["funding_rate"] = self.funding_rate
+            if self.open_interest_change_24h is not None:
+                out["open_interest_change_24h"] = self.open_interest_change_24h
+        return out
 
     @property
     def ready(self) -> bool:

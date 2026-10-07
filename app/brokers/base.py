@@ -50,6 +50,19 @@ class BrokerAdapter(ABC):
 
     name: str = "base"
     paper: bool = True
+    # D.5.6: capability flags so engine decision paths never branch on vendor
+    # name. Default to the most conservative semantics.
+    supports_in_kind_fees: bool = False
+    requires_authoritative_qty_on_exit: bool = False
+    authoritative_positions_require_connection: bool = True
+
+    def resolve_symbol(self, canonical_symbol: str) -> str:
+        """Adapter-facing symbol/representation for this broker.
+
+        Default: pass through unchanged. Overrides apply vendor mappings
+        (e.g. Alpaca crypto: BTC/USD -> BTCUSD).
+        """
+        return canonical_symbol
 
     @abstractmethod
     async def connect(self) -> None: ...

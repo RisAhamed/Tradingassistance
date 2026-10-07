@@ -22,6 +22,12 @@ logger = logging.getLogger("app.brokers.mock")
 class MockBroker(BrokerAdapter):
     name = "mock"
     paper = True
+    # Capability flags match leak-fix defaults: in-kind fees disabled, no
+    # authoritative-qty clamp, synthetic positions are available regardless of
+    # live connection state.
+    supports_in_kind_fees = False
+    requires_authoritative_qty_on_exit = False
+    authoritative_positions_require_connection = False
 
     def __init__(
         self,

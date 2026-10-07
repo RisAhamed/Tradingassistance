@@ -32,9 +32,26 @@ class TradingConfig(_Section):
     mode: TradingMode = "paper"
     enabled: bool = True
     symbol: str = Field(min_length=1)
+    # Forward-compatible multi-symbol list (Phase L). Only ``symbol`` is used
+    # today; the list exists so multi-symbol can land without a config break.
+    symbols: list[str] | None = None
     market: str = "crypto"
-    broker: Literal["alpaca", "mock"] = "alpaca"
+    broker: str = "alpaca"
+    enabled: bool = True
+    symbol: str = Field(min_length=1)
+    market: str = "crypto"
+    # broker: str selected via the broker registry below; Literal removed so
+    # adding a vendor does not require editing the schema.
     autostart: bool = True
+
+    @field_validator("broker")
+    @classmethod
+    def _broker_known(cls, value: str) -> str:
+        from app.brokers.registry import known_brokers
+
+        if value not in known_brokers():
+            raise ValueError(f"unknown broker '{value}' (known: {known_brokers()})")
+        return value
 
     @field_validator("mode")
     @classmethod
@@ -42,6 +59,15 @@ class TradingConfig(_Section):
         if value != "paper":
             raise ValueError("PAPER_TRADING_ONLY: trading.mode must be 'paper'")
         return value
+
+    @model_validator(mode="after")
+    def _symbols_include_primary(self) -> "TradingConfig":
+        if self.symbols is None:
+            self.symbols = [self.symbol]
+            return self
+        if self.symbol not in self.symbols:
+            raise ValueError("trading.symbol must be present in trading.symbols")
+        return self
 
 
 class SessionConfig(_Section):
@@ -194,8 +220,27 @@ class DataFreshnessConfig(_Section):
         return self
 
 
+class MarketDataSymbolConfig(_Section):
+    # Quote suffixes considered when expanding Alpaca-style BTCUSD into
+    # canonical BTC/USD. Longest-first matching is used, so "USDT" wins.
+    quote_suffixes: list[str] = Field(default_factory=lambda: ["USDT", "USDC", "USD", "BTC", "ETH"])
+    base_pattern: str | None = None
+
+    @field_validator("quote_suffixes")
+    @classmethod
+    def _suffixes_nonempty(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("market_data.symbol.quote_suffixes must not be empty")
+        return [str(v).upper() for v in value]
+
+
 class MarketDataConfig(_Section):
-    provider: Literal["alpaca", "mock"] = "alpaca"
+    # ``provider`` is a registry-resolved vendor name (not a Literal) so new
+    # market-data providers can be added without altering the schema.
+    provider: str = "alpaca"
+    feed: str = "crypto"
+    feed: str = "crypto"
+    feed: str = "crypto"
     feed: str = "crypto"
     websocket_enabled: bool = True
     reconnect: ReconnectConfig = Field(default_factory=ReconnectConfig)
@@ -206,6 +251,17 @@ class MarketDataConfig(_Section):
     # Clock integrity: updates stamped further than this into the future are
     # rejected before they can touch store/aggregator/feature state.
     max_future_skew_seconds: float = 5.0
+
+    @field_validator("provider")
+    @classmethod
+    def _provider_known(cls, value: str) -> str:
+        from app.market_data.registry import known_providers
+
+        if value not in known_providers():
+            raise ValueError(f"unknown market-data provider '{value}' (known: {known_providers()})")
+        return value
+
+    symbol: MarketDataSymbolConfig = Field(default_factory=MarketDataSymbolConfig)
 
 
 class TimeframeCandidateConfig(_Section):
@@ -356,6 +412,40 @@ class MeanReversionConfig(_Section):
     volume_ratio_min: float = 0.7
 
 
+class StrategySelectionConfig(_Section):
+    mode: Literal["manual", "regime_aware"] = "manual"
+    manual_name: str = "breakout_momentum"
+    fallback_name: str = "breakout_momentum"
+    map: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("mode")
+    @classmethod
+    def _allowed_mode(cls, v: str) -> str:
+        if v not in ("manual", "regime_aware"):
+            raise ValueError(f"strategy.selection.mode must be manual|regime_aware, got '{v}'")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_registered(self) -> "StrategySelectionConfig":
+        from app.strategies.registry import known_strategies
+
+        known = known_strategies()
+        for field_name, name in (
+            ("manual_name", self.manual_name),
+            ("fallback_name", self.fallback_name),
+        ):
+            if name not in known:
+                raise ValueError(
+                    f"strategy.selection.{field_name} references unknown strategy '{name}' (known: {known})"
+                )
+        for regime, name in self.map.items():
+            if name not in known:
+                raise ValueError(
+                    f"strategy.selection.map['{regime}'] references unknown strategy '{name}' (known: {known})"
+                )
+        return self
+
+
 class StrategyConfig(_Section):
     enabled: bool = True
     name: str = "breakout_momentum"
@@ -371,6 +461,8 @@ class StrategyConfig(_Section):
     spread: SpreadConfig = Field(default_factory=SpreadConfig)
     cooldown: CooldownConfig = Field(default_factory=CooldownConfig)
     mean_reversion: MeanReversionConfig = Field(default_factory=MeanReversionConfig)
+    selection: StrategySelectionConfig = Field(default_factory=StrategySelectionConfig)
+
 
 class StopLossConfig(_Section):
     enabled: bool = True
@@ -383,6 +475,9 @@ class TakeProfitConfig(_Section):
 
 
 class StaleDataConfig(_Section):
+    # DEPRECATED: the effective freshness threshold is owned by
+    # ``market_data.freshness`` (app/decision/freshness.py FreshnessPolicy).
+    # Kept only for backwards compatibility; do not treat as authoritative.
     maximum_age_seconds: float = 5.0
 
 
@@ -701,6 +796,27 @@ class PaperSafetyConfig(_Section):
     max_notional_exposure: float = 150.0
 
 
+class SentimentConfig(_Section):
+    """Observation-only sentiment layer (Phase E).
+
+    Enriches FeatureSnapshot for display/persistence. NEVER gates entries,
+    adjusts confidence, or selects strategies in this phase (explicitly
+    deferred to Phases F/G). Default OFF.
+    """
+
+    enabled: bool = False
+    provider: Literal["fear_greed", "cryptopanic", "funding", "mock", "none"] = "none"
+    refresh_interval_seconds: float = 300.0
+    maximum_age_seconds: float = 900.0
+    stale_action: Literal["mark_stale", "drop"] = "mark_stale"
+    http_timeout_seconds: float = 10.0
+    mock_seed: int = 7
+    # Forward-compatible multi-symbol placeholder (Phase L). No code reads it
+    # yet; it exists so the config file never needs a breaking migration.
+    per_symbol_overrides: dict[str, str] = Field(default_factory=dict)
+
+
+
 class AppConfig(_Section):
     """Root configuration object (everything from configs/config.yaml)."""
 
@@ -724,6 +840,7 @@ class AppConfig(_Section):
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    sentiment: SentimentConfig = Field(default_factory=SentimentConfig)
     trade_plan: TradePlanConfig = Field(default_factory=TradePlanConfig)
     testing: TestingConfig = Field(default_factory=TestingConfig)
     recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)

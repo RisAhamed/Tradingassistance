@@ -159,7 +159,6 @@ class MarketEventRow(Base):
 
 class TradePlanRow(Base):
     __tablename__ = "trade_plans"
-
     plan_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     session_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -187,4 +186,21 @@ class TradePlanRow(Base):
     reason_codes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     invalidation_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
     source_signal_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class SentimentRecordRow(Base):
+    """Phase E: persisted observation-only sentiment snapshots."""
+
+    __tablename__ = "sentiment_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    source: Mapped[str] = mapped_column(String(32))
+    score: Mapped[float] = mapped_column(Float)
+    fear_greed: Mapped[float | None] = mapped_column(Float, nullable=True)
+    funding_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    open_interest_change_24h: Mapped[float | None] = mapped_column(Float, nullable=True)
+    news_volume: Mapped[int | None] = mapped_column(Integer, nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

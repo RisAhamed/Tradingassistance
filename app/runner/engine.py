@@ -39,7 +39,7 @@ from app.domain.pnl import TradeRecord
 from app.domain.regime import RegimeSnapshot
 from app.domain.risk import RiskDecision
 from app.domain.signals import StrategySignal
-from app.domain.symbols import canonical_symbol
+from app.domain.symbols import canonical_symbol, init_quote_suffixes
 from app.events.bus import EventBus
 from app.decision.freshness import FreshnessPolicy
 from app.decision.selector import TimeframeSelector, TimeframeSelection
@@ -51,6 +51,7 @@ from app.experiment.manager import ExperimentManager, ExperimentState
 from app.safety.paper_cap import PaperSafetyCap
 from app.features.engine import FeatureEngine
 from app.market_data.aggregator import CandleAggregator
+from app.sentiment.models import SentimentSnapshot
 from app.market_data.base import MarketDataProvider, MarketUpdate
 from app.market_data.history import (
     AlpacaHistoricalDataClient,
@@ -69,7 +70,7 @@ from app.regime.engine import RegimeEngine
 from app.recovery import RecoveryState, RecoveryStateMachine
 from app.risk.engine import RiskContext, RiskEngine
 from app.accounting.ledger import FillLedger
-from app.runner.factories import create_broker, create_provider
+from app.runner.factories import create_broker, create_provider, create_sentiment_provider
 from app.sessions.manager import SessionManager
 from app.strategies.base import StrategyContext
 from app.strategies.registry import build_strategy
@@ -136,11 +137,24 @@ class TradingEngine:
             "recoveries": 0,
         }
 
+        # Phase E: observation-only sentiment layer. The provider is built once
+        # at startup via the registry; the poll loop below keeps
+        # ``state.sentiment`` fresh. The layer never gates entries, adjusts
+        # confidence, or selects strategies in this phase.
+        self.sentiment_provider = create_sentiment_provider(config, env)
+        self._sentiment: SentimentSnapshot | None = None
+        self._sentiment_task: asyncio.Task | None = None
+        self._sentiment_stale_emitted = False
         self.feature_engine = FeatureEngine(config.features)
         self.regime_engine = RegimeEngine(
             config.regime, fast_period=config.strategy.trend.fast_ema, slow_period=config.strategy.trend.slow_ema
         )
+        from app.strategies.orchestrator import StrategyOrchestrator
+
         strategy = build_strategy(config.strategy)
+        self.strategy = strategy
+        self.orchestrator = StrategyOrchestrator(config.strategy.selection)
+        self._generator_cache: dict[str, SignalGenerator] = {}
         self.generator = SignalGenerator(strategy, config.risk)
         self.risk_engine = RiskEngine(
             config.risk,
@@ -231,6 +245,12 @@ class TradingEngine:
         if len(self._decision_trace) > self.config.trade_plan.decision_trace_max_stages:
             del self._decision_trace[: len(self._decision_trace) - self.config.trade_plan.decision_trace_max_stages]
         return entry
+
+    def _generator_for(self, name: str) -> SignalGenerator:
+        if name not in self._generator_cache:
+            strategy = self.orchestrator.strategy_for(name)
+            self._generator_cache[name] = SignalGenerator(strategy, self.config.risk)
+        return self._generator_cache[name]
 
     def decision_trace(self) -> list[dict]:
         """Return the current decision-cycle trace (most recent last)."""
@@ -383,6 +403,7 @@ class TradingEngine:
             "SYSTEM STARTING",
             extra={"structured": {"event": "SYSTEM_STARTING", "component": "engine"}},
         )
+        init_quote_suffixes(getattr(self.config.market_data.symbol, "quote_suffixes", []) or [])
         logger.info(
             "CONFIGURATION LOADED",
             extra={"structured": {"event": "CONFIGURATION_LOADED", "component": "engine", "symbol": self.symbol}},
@@ -391,6 +412,11 @@ class TradingEngine:
             "PAPER MODE VERIFIED",
             extra={"structured": {"event": "PAPER_MODE_VERIFIED", "component": "engine", "mode": self.config.trading.mode}},
         )
+        if getattr(self.config.risk.stale_market_data, "maximum_age_seconds", None) is not None and self.config.risk.stale_market_data.maximum_age_seconds != 5.0:
+            logger.warning(
+                "risk.stale_market_data.maximum_age_seconds is deprecated; effective threshold owned by FreshnessPolicy",
+                extra={"structured": {"event": "DEPRECATED_CONFIG", "component": "config", "key": "risk.stale_market_data.maximum_age_seconds"}},
+            )
         if not self.execution_enabled:
             # PHASE B: the whole pipeline runs, only order submission is gated.
             logger.warning(
@@ -502,6 +528,7 @@ class TradingEngine:
 
         self._running = True
         self._schedule_tick()
+        self._schedule_sentiment()
         logger.info(
             "ENGINE STARTED",
             extra={"structured": {"event": "ENGINE_STARTED", "component": "engine"}},
@@ -510,6 +537,18 @@ class TradingEngine:
 
     async def stop(self) -> None:
         self._running = False
+        # Phase E: cancel the bounded sentiment poll loop first so shutdown
+        # is prompt even mid-poll.
+        task = self._sentiment_task
+        self._sentiment_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 - shutdown must not raise
+                logger.exception("sentiment loop shutdown error")
         await self.provider.disconnect()
         await self.broker.disconnect()
         logger.info("ENGINE STOPPED", extra={"structured": {"event": "ENGINE_STOPPED", "component": "engine"}})
@@ -562,6 +601,129 @@ class TradingEngine:
     def _schedule_tick(self) -> None:
         if self._tick_task is None or self._tick_task.done():
             self._tick_task = asyncio.create_task(self._tick_loop())
+
+    # -- Phase E: observation-only sentiment poll loop ----------------------
+    def _schedule_sentiment(self) -> None:
+        if self.sentiment_provider is None:
+            return
+        if self._sentiment_task is None or self._sentiment_task.done():
+            self._sentiment_task = asyncio.create_task(self._sentiment_loop())
+
+    async def _sentiment_loop(self) -> None:
+        """Bounded poll loop: fetch -> cache -> emit -> persist (best-effort).
+
+        Never raises out: provider failures emit SENTIMENT_UNAVAILABLE +
+        WARNING and the loop sleeps until the next interval. Cancelled on
+        ``stop()``. Produces zero orders by construction (observation only).
+        """
+        interval = max(1.0, float(self.config.sentiment.refresh_interval_seconds))
+        # Fetch once immediately so the dashboard/API have data without
+        # waiting a full interval; tests can also await a single poll.
+        await self._poll_sentiment_once()
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            if not self._running:
+                break
+            await self._poll_sentiment_once()
+
+    async def _poll_sentiment_once(self) -> None:
+        provider = self.sentiment_provider
+        if provider is None or not self.config.sentiment.enabled:
+            return
+        try:
+            snapshot = await provider.fetch(self.symbol)
+        except Exception as exc:  # noqa: BLE001 - observation only, never fatal
+            logger.warning(
+                "SENTIMENT UNAVAILABLE",
+                extra={
+                    "structured": {
+                        "event": "SENTIMENT_UNAVAILABLE",
+                        "component": "sentiment",
+                        "provider": getattr(provider, "name", "unknown"),
+                        "error": str(exc),
+                    }
+                },
+            )
+            await self.bus.emit(
+                EventType.SENTIMENT_UNAVAILABLE,
+                payload={"provider": getattr(provider, "name", "unknown"), "error": str(exc)},
+            )
+            return
+        self._sentiment = snapshot
+        self._sentiment_stale_emitted = False
+        await self.bus.emit(EventType.SENTIMENT_UPDATED, payload=snapshot.sanitized())
+        logger.info(
+            "SENTIMENT UPDATED",
+            extra={
+                "structured": {
+                    "event": "SENTIMENT_UPDATED",
+                    "component": "sentiment",
+                    "provider": getattr(provider, "name", "unknown"),
+                    "score": snapshot.score,
+                }
+            },
+        )
+        await self._persist_sentiment(snapshot)
+
+    async def _persist_sentiment(self, snapshot: SentimentSnapshot) -> None:
+        """Best-effort persistence: failures are counted, never fatal."""
+        if self.repository is None:
+            return
+        try:
+            available = self.repository.available
+        except Exception:  # noqa: BLE001 - defensive
+            available = False
+        if not available:
+            return
+        try:
+            await self.repository.save_sentiment(snapshot)
+        except Exception as exc:  # noqa: BLE001 - counted upstream too
+            logger.error(
+                "sentiment persistence failure",
+                extra={
+                    "structured": {
+                        "event": "PERSISTENCE_ERROR",
+                        "component": "sentiment",
+                        "error": str(exc),
+                    }
+                },
+            )
+
+    def sentiment_payload(self) -> dict | None:
+        """Sanitized sentiment view for API / dashboard / AI tools."""
+        current = self._sentiment
+        if current is None:
+            return None
+        now = utcnow()
+        age = current.age_seconds(now)
+        stale = age > self.config.sentiment.maximum_age_seconds
+        provider = self.sentiment_provider
+        try:
+            health = provider.health() if provider is not None else None
+        except Exception:  # noqa: BLE001 - health never raises the payload
+            health = None
+        return {
+            "snapshot": current.sanitized(),
+            "age_seconds": age,
+            "stale": stale,
+            "maximum_age_seconds": self.config.sentiment.maximum_age_seconds,
+            "provider": getattr(provider, "name", "none") if provider else "none",
+            "enabled": bool(self.config.sentiment.enabled),
+            "health": (
+                {
+                    "connected": health.connected,
+                    "detail": health.detail,
+                    "last_message_at": health.last_message_at.isoformat()
+                    if health and health.last_message_at
+                    else None,
+                }
+                if health is not None
+                else None
+            ),
+        }
 
     async def _tick_loop(self) -> None:
         while self._running:
@@ -774,7 +936,37 @@ class TradingEngine:
     def _features_for(self, timeframe: str, now: datetime):
         candles = self.store.candles(self.symbol, timeframe)
         snapshot = self.store.snapshot(self.symbol)
-        return self.feature_engine.compute(candles, timeframe=timeframe, snapshot=snapshot, now=now)
+        # Phase E: inject the latest sentiment snapshot via the optional
+        # ``sentiment=`` kwarg (smallest diff — the existing ``snapshot``
+        # positional path is the market-data snapshot, not sentiment).
+        # Staleness is enforced inside FeatureEngine.compute against
+        # ``sentiment.maximum_age_seconds``; stale readings are flagged and
+        # excluded from numeric_values(). Never influences ready/regime/risk.
+        sentiment = self._fresh_sentiment_for_features(now)
+        return self.feature_engine.compute(
+            candles,
+            timeframe=timeframe,
+            snapshot=snapshot,
+            now=now,
+            sentiment=sentiment,
+            sentiment_maximum_age_seconds=self.config.sentiment.maximum_age_seconds,
+        )
+
+    def _fresh_sentiment_for_features(self, now: datetime) -> SentimentSnapshot | None:
+        """Return the cached sentiment snapshot for feature enrichment.
+
+        ``stale_action=drop`` returns None once older than
+        ``maximum_age_seconds`` (features carry no sentiment metadata at
+        all); ``mark_stale`` (default) still passes the snapshot through so
+        ``FeatureEngine`` can flag it and exclude it from numerics.
+        """
+        current = self._sentiment
+        if current is None:
+            return None
+        if self.config.sentiment.stale_action == "drop":
+            if current.age_seconds(now) > self.config.sentiment.maximum_age_seconds:
+                return None
+        return current
 
     async def _on_bar(self, candle: Candle) -> None:
         """Validate a canonical 1-minute bar, detect gaps, and aggregate."""
@@ -1124,8 +1316,42 @@ class TradingEngine:
             session_id=self.session.session_id,
         )
 
+        # Regime-aware strategy selection (default mode=manual -> previous single strategy).
+        active = self.orchestrator.resolve(regime.regime)
+        previous = getattr(self, "_last_active_strategy", None)
+        if previous is None or previous != active.name:
+            self._last_active_strategy = active.name
+            logger.info(
+                "STRATEGY_SELECTED",
+                extra={
+                    "structured": {
+                        "event": "STRATEGY_SELECTED",
+                        "component": "strategy",
+                        "regime": regime.regime.value,
+                        "strategy": active.name,
+                        "previous_strategy": previous,
+                        "mode": self.config.strategy.selection.mode,
+                        "reason": self.orchestrator.snapshot().get("last_reason"),
+                    }
+                },
+            )
+            try:
+                await self.bus.emit(
+                    EventType.STRATEGY_SELECTED,
+                    payload={
+                        "regime": regime.regime.value,
+                        "strategy": active.name,
+                        "previous_strategy": previous,
+                        "mode": self.config.strategy.selection.mode,
+                        "reason": self.orchestrator.snapshot().get("last_reason"),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        generator = self._generator_for(active.name)
+
         try:
-            signal = self.generator.generate(context)
+            signal = generator.generate(context)
         except Exception:  # noqa: BLE001 - strategy failures must not kill the engine
             logger.exception(
                 "STRATEGY ERROR",
@@ -2330,7 +2556,7 @@ class TradingEngine:
         stay exactly equal. A large, unexplained delta is flagged for
         reconciliation and NOT silently absorbed as a fee.
         """
-        if self.broker.name != "alpaca" or not self.execution_enabled:
+        if not getattr(self.broker, "supports_in_kind_fees", False) or not self.execution_enabled:
             return
         position = self.position_manager.position
         if position.is_flat:
@@ -2596,7 +2822,7 @@ class TradingEngine:
         # will reject. Deterministic mocks keep their seam behavior and use the
         # tracked quantity directly (matching previous test semantics).
         safe_qty = abs(position.quantity)
-        if self.broker.name == "alpaca":
+        if getattr(self.broker, "requires_authoritative_qty_on_exit", False):
             bstatus, bpositions = await self._authoritative_broker_positions()
             broker_qty: float | None = None
             if bstatus == "ok":
@@ -2690,7 +2916,7 @@ class TradingEngine:
             "error"       - the broker query itself failed
         """
         connected = self.broker.health().connected
-        if not connected and self.broker.name == "alpaca":
+        if not connected and getattr(self.broker, "authoritative_positions_require_connection", True):
             return "unavailable", []
         try:
             positions = await self.broker.get_positions()
@@ -3123,10 +3349,48 @@ class TradingEngine:
 
         self.state.risk = self._risk_status(now)
         self.state.session = self.session.snapshot(now)
+        # Phase E: edge-triggered sentiment staleness (observation only — the
+        # tick loop itself never consumes sentiment for decisions).
+        await self._check_sentiment_staleness(now)
         # Phase D.1: re-check the active TradePlan on every tick so a plan can
         # never outlive the market state that justified it.
         await self._invalidate_trade_plan_if_needed(now)
         await self._publish_readiness_change()
+
+    async def _check_sentiment_staleness(self, now: datetime) -> None:
+        """Emit SENTIMENT_STALE once when the cached snapshot expires.
+
+        Observation-only: no gate, no block, no order impact. ``drop`` mode
+        additionally withholds the snapshot from feature enrichment (handled
+        in ``_fresh_sentiment_for_features``); ``mark_stale`` keeps it
+        visible-but-flagged.
+        """
+        current = self._sentiment
+        if current is None or self.sentiment_provider is None:
+            return
+        if self._sentiment_stale_emitted:
+            return
+        if current.age_seconds(now) > self.config.sentiment.maximum_age_seconds:
+            self._sentiment_stale_emitted = True
+            await self.bus.emit(
+                EventType.SENTIMENT_STALE,
+                payload={
+                    "provider": getattr(self.sentiment_provider, "name", "unknown"),
+                    "age_seconds": current.age_seconds(now),
+                    "maximum_age_seconds": self.config.sentiment.maximum_age_seconds,
+                    "stale_action": self.config.sentiment.stale_action,
+                },
+            )
+            logger.warning(
+                "SENTIMENT STALE",
+                extra={
+                    "structured": {
+                        "event": "SENTIMENT_STALE",
+                        "component": "sentiment",
+                        "age_seconds": current.age_seconds(now),
+                    }
+                },
+            )
 
     async def _update_data_health(self, now: datetime) -> None:
         # Phase D.1: ONE authoritative freshness measurement. This previously
@@ -3333,6 +3597,9 @@ class TradingEngine:
         data["trade_plan_history"] = [
             p.model_dump(mode="json") for p in self._trade_plan_history[-20:]
         ]
+        # Phase E: observation-only sentiment view (sanitized, secret-free).
+        data["sentiment"] = self.sentiment_payload()
+        data["strategy_selection"] = self.orchestrator.describe()
         return data
 
     @property

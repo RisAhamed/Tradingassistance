@@ -10,8 +10,16 @@ valid symbol.
 from __future__ import annotations
 
 # Quote suffixes we know how to expand. Longest first so ``USDT`` is tried
-# before ``USD``.
-_QUOTE_SUFFIXES = ("USDT", "USDC", "USD", "BTC", "ETH")
+# before ``USD``. Phase D.5.6: configurable via market_data.symbol.quote_suffixes.
+_DEFAULT_QUOTE_SUFFIXES = ("USDT", "USDC", "USD", "BTC", "ETH")
+_QUOTE_SUFFIXES: tuple[str, ...] = _DEFAULT_QUOTE_SUFFIXES
+
+
+def init_quote_suffixes(suffixes) -> None:
+    """Called at engine startup with the configured suffix list.
+    Module stays importable with sane default (no config dependency)."""
+    global _QUOTE_SUFFIXES
+    _QUOTE_SUFFIXES = tuple(str(s).upper() for s in suffixes)
 
 
 def canonical_symbol(raw: str) -> str:
@@ -37,4 +45,4 @@ def to_broker_symbol(raw: str) -> str:
     return canonical_symbol(raw).replace("/", "")
 
 
-__all__ = ["canonical_symbol", "symbols_equal", "to_broker_symbol"]
+__all__ = ["canonical_symbol", "symbols_equal", "to_broker_symbol", "init_quote_suffixes"]

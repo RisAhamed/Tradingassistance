@@ -38,6 +38,9 @@ _STATUS_MAP: dict[str, OrderStatus] = {
 class AlpacaPaperBroker(BrokerAdapter):
     name = "alpaca"
     paper = True
+    supports_in_kind_fees = True
+    requires_authoritative_qty_on_exit = True
+    authoritative_positions_require_connection = True
 
     def __init__(self, api_key: str, api_secret: str, *, feed: str = "crypto") -> None:
         from alpaca.trading.client import TradingClient  # lazy import
@@ -89,18 +92,32 @@ class AlpacaPaperBroker(BrokerAdapter):
         return positions
 
     # -- order flow ---------------------------------------------------------
+    def resolve_symbol(self, canonical_symbol: str) -> str:
+        """Alpaca-facing symbol: ``BTC/USD`` -> ``BTCUSD`` (no "/" separator)."""
+        from app.domain.symbols import to_broker_symbol
+
+        return to_broker_symbol(canonical_symbol)
+
+    def _resolve_symbol_and_tif(self, symbol: str, order_type: OrderType):
+        """Return (alpaca_symbol, tif_str) for this canonical symbol/order type.
+
+        Alpaca crypto perps/markets use ``BTCUSD`` (no "/") and reject GTC
+        for market crypto orders; GTC is only valid for stocks. Source:
+        Alpaca Trading API (https://docs.alpaca.markets).
+        """
+        tif_str = "IOC" if ("/" in symbol or "USD" in symbol[-3:]) else "GTC"
+        return self.resolve_symbol(symbol), tif_str
+
     def _build_request(self, order: Order):
         from alpaca.trading.enums import OrderSide, TimeInForce as AlpacaTif
         from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 
         side = OrderSide.BUY if order.side is Side.BUY else OrderSide.SELL
-        tif = AlpacaTif.GTC
-        if "/" in order.symbol:
-            # D.4: Alpaca crypto market orders must use IOC; GTC is rejected.
-            tif = AlpacaTif.IOC
+        symbol, tif_str = self._resolve_symbol_and_tif(order.symbol, order.order_type)
+        tif = AlpacaTif.IOC if tif_str == "IOC" else AlpacaTif.GTC
         if order.order_type is OrderType.LIMIT and order.limit_price:
             return LimitOrderRequest(
-                symbol=order.symbol,
+                symbol=symbol,
                 qty=order.quantity,
                 side=side,
                 time_in_force=tif,
@@ -108,7 +125,7 @@ class AlpacaPaperBroker(BrokerAdapter):
                 client_order_id=order.client_order_id,
             )
         return MarketOrderRequest(
-            symbol=order.symbol,
+            symbol=symbol,
             qty=order.quantity,
             side=side,
             time_in_force=tif,

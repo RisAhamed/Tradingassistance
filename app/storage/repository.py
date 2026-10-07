@@ -108,6 +108,31 @@ class Repository:
 
         await self._run(op, "save_signal")
 
+    async def save_sentiment(self, snapshot) -> bool:
+        """Persist one observation-only sentiment snapshot (best-effort).
+
+        Returns True when accepted; failures are counted in ``failures``
+        via ``_run`` and never raise.
+        """
+        from app.storage.models import SentimentRecordRow
+
+        async def op(db) -> None:
+            db.add(
+                SentimentRecordRow(
+                    created_at=snapshot.timestamp,
+                    symbol=snapshot.symbol,
+                    source=snapshot.source,
+                    score=snapshot.score,
+                    fear_greed=snapshot.fear_greed,
+                    funding_rate=snapshot.funding_rate,
+                    open_interest_change_24h=snapshot.open_interest_change_24h,
+                    news_volume=snapshot.news_volume,
+                    payload=snapshot.model_dump(mode="json"),
+                )
+            )
+
+        return await self._run(op, "save_sentiment")
+
     async def save_risk_decision(self, decision: RiskDecision) -> None:
         from app.storage.models import RiskDecisionRow
 

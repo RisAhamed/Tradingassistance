@@ -36,6 +36,9 @@ session:
   max_holding_minutes: 240
 
 market_data:
+  symbol:
+    quote_suffixes: ["USDT", "USDC", "USD", "BTC", "ETH"]
+    base_pattern: null
   provider: alpaca           # alpaca | mock
   feed: crypto
   websocket_enabled: true
@@ -152,6 +155,19 @@ strategy:
   enabled: true
   name: breakout_momentum
   version: "1.0"
+  # Phase F: deterministic selection. Safe default keeps legacy single-strategy behaviour.
+  selection:
+    mode: manual            # manual | regime_aware
+    manual_name: breakout_momentum
+    fallback_name: breakout_momentum
+    map:
+      trending_bullish: breakout_momentum
+      trending_bearish: breakout_momentum
+      range_bound: vwap_reversion
+      high_volatility: breakout_momentum
+      low_volatility: session_vwap_reversion
+      unknown: breakout_momentum
+
   # Candidate under validation (selected per-run via --strategy; the
   # repository default stays on the frozen breakout baseline so the
   # D.6/D.7-R2 suites keep testing exactly what they validated).
@@ -200,6 +216,9 @@ risk:
     enabled: true
     risk_reward_ratio: 2.0
   maximum_holding_minutes: 240
+  # DEPRECATED: the authoritative freshness gate now lives under
+  # market_data.freshness (FreshnessPolicy). This key is read only for
+  # backwards compatibility; do not treat it as the active threshold.
   stale_market_data:
     maximum_age_seconds: 5
   maximum_spread_percent: 0.10
@@ -350,6 +369,19 @@ storage:
   sqlite_path: data/trading_agent.sqlite3
   echo: false
 
+# Phase E — observation-only sentiment + microstructure layer. Default OFF.
+# Enriches FeatureSnapshot for display/persistence only; it NEVER gates
+# entries, adjusts confidence, or selects strategies in this phase.
+sentiment:
+  enabled: false
+  provider: none             # fear_greed | cryptopanic | funding | mock | none
+  refresh_interval_seconds: 300
+  maximum_age_seconds: 900
+  stale_action: mark_stale   # mark_stale | drop
+  http_timeout_seconds: 10.0
+  # No code reads per_symbol_overrides yet (Phase L placeholder).
+  per_symbol_overrides: {}
+
 # Verification tooling. NEVER auto-enabled on normal startup; the harnesses
 # (scripts/soak_alpaca.py, scripts/outage_recovery.py) read these values.
 testing:
@@ -384,6 +416,8 @@ recovery:
   require_regime_rebuild: true
   require_readiness_revalidation: true
 
+# Phase D.5.6: provider/broker are registry-driven vendor names; symbol
+# quote suffixes live here, not hard-coded in engine/domain code.
 fault_injection:
   enabled: false
   scenarios: []

@@ -65,6 +65,7 @@
     <section><h2>Features</h2><pre id="features">loading…</pre></section>
     <section><h2>Regime</h2><pre id="regime">loading…</pre></section>
     <section><h2>Strategy</h2><pre id="strategy">loading…</pre></section>
+    <section><h2>Strategy Selection</h2><pre id="strategy-selection">loading…</pre></section>
     <section><h2>Risk</h2><pre id="risk">loading…</pre></section>
     <section><h2>Position</h2><pre id="position">loading…</pre></section>
     <section><h2>P&amp;L</h2><pre id="pnl">loading…</pre></section>
@@ -80,6 +81,8 @@
     <section><h2>Recovery</h2><pre id="recovery">loading…</pre></section>
     <section><h2>Logging</h2><pre id="logging">loading…</pre></section>
     <section><h2>Decision Trace</h2><pre id="decision-trace">loading…</pre></section>
+    <!-- Phase E: observation-only sentiment (never gates trading) -->
+    <section><h2>Sentiment</h2><pre id="sentiment">loading…</pre></section>
     <section><h2>Live events (SSE)</h2><div id="stream">connecting…</div></section>
   </main>
   <script>
@@ -92,13 +95,13 @@
     }
     async function refresh() {
       try {
-        const [health, system, market, mdata, warm, handoff, loggingState, exec, ready, features, regime, strategy, risk, positions, pnl, orders, session, ai, decision, freshnessState, lifecycle] =
+        const [health, system, market, mdata, warm, handoff, loggingState, exec, ready, features, regime, strategy, risk, positions, pnl, orders, session, ai, decision, freshnessState, lifecycle, sentiment] =
           await Promise.all([
             get("/health"), get("/api/system/status"), get("/api/market/latest"), get("/api/market/status"),
             get("/api/warmup"), get("/api/handoff"), get("/api/logging"), get("/api/execution"), get("/api/readiness"),
             get("/api/features"), get("/api/regime"), get("/api/strategy/status"), get("/api/risk/status"), get("/api/positions"),
             get("/api/pnl"), get("/api/orders"), get("/api/session"), get("/api/ai/status"), get("/api/decision"),
-            get("/api/freshness"), get("/api/trade-plan/lifecycle"),
+            get("/api/freshness"), get("/api/trade-plan/lifecycle"), get("/api/sentiment"),
           ]);
         $("health").textContent = "health: " + health.status + (health.ready ? " (ready)" : " (not ready)");
         $("health").className = "banner " + (health.status === "healthy" ? "ok" : health.status === "warning" ? "warn" : "err");
@@ -123,7 +126,8 @@
 
         show("system", system); show("mdata", md); show("warm", warm); show("handoff", handoff); show("candles", handoff.candles || {}); show("recovery", handoff.recovery || {}); show("logging", loggingState); show("exec", exec); show("ready", ready); show("market", market);
         show("features", features); show("regime", regime);
-        show("strategy", strategy); show("risk", risk); show("position", positions);
+        show("strategy", strategy);
+        show("strategy-selection", (strategy && strategy.strategy_selection) || {}); show("risk", risk); show("position", positions);
         show("pnl", pnl); show("orders", orders); show("sess", session); show("ai", ai);
         // Phase D
         show("freshness", decision.freshness_policy);
@@ -132,6 +136,8 @@
         show("tradeplan", decision.trade_plan);
         show("tradeplan-lifecycle", lifecycle);
         show("decision-trace", decision.decision_trace || []);
+        // Phase E: observation-only sentiment card (score, gauge, microstructure, age, stale flag).
+        show("sentiment", sentiment || "sentiment disabled");
         $("session").textContent = "session: " + (((session || {}).session || {}).state || "…");
       } catch (err) { $("health").textContent = "health: api unavailable (" + err.message + ")"; }
     }

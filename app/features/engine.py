@@ -13,6 +13,7 @@ from app.core.clock import utcnow
 from app.domain.features import FeatureSnapshot
 from app.domain.market import Candle, MarketSnapshot
 from app.features import indicators as ind
+from app.sentiment.models import SentimentSnapshot
 
 
 def session_vwap_value(candles: list[Candle]) -> float | None:
@@ -70,8 +71,17 @@ class FeatureEngine:
         timeframe: str,
         snapshot: MarketSnapshot | None = None,
         now: datetime | None = None,
+        sentiment: SentimentSnapshot | None = None,
+        sentiment_maximum_age_seconds: float | None = None,
     ) -> FeatureSnapshot:
-        """Compute the latest feature snapshot from closed candles."""
+        """Compute the latest feature snapshot from closed candles.
+
+        ``sentiment`` is a strictly optional observation-only enrichment
+        (Phase E): it is attached as snapshot metadata and merged into
+        ``numeric_values()`` only while fresh. It never enters the ``ready``
+        required set and never influences regime/strategy/risk. ``now`` is
+        accepted so tests can pin the staleness clock deterministically.
+        """
         now = now or utcnow()
         if not candles:
             return FeatureSnapshot(
@@ -122,6 +132,8 @@ class FeatureEngine:
         if self.config.volume.enabled:
             values["volume_ratio"] = ind.volume_ratio(volumes, lookback)
 
+        sentiment_fields = _sentiment_fields(sentiment, now=now, maximum_age_seconds=sentiment_maximum_age_seconds)
+
         return FeatureSnapshot(
             symbol=symbol,
             timestamp=candles[-1].timestamp,
@@ -133,4 +145,34 @@ class FeatureEngine:
             data_age_seconds=snapshot.age_seconds(now) if snapshot else None,
             candle_count=len(candles),
             values=values,
+            **sentiment_fields,
         )
+
+
+def _sentiment_fields(
+    sentiment: SentimentSnapshot | None,
+    *,
+    now: datetime,
+    maximum_age_seconds: float | None,
+) -> dict:
+    """Map a sentiment snapshot onto FeatureSnapshot fields (fail-closed).
+
+    Staleness rule: when ``maximum_age_seconds`` is set and the snapshot is
+    older than it, the fields carry ``sentiment_stale=True`` and None values
+    so the stale reading never enters ``numeric_values()``. Fresh (or
+    un-bounded) snapshots attach their values as pure metadata.
+    """
+    if sentiment is None:
+        return {}
+    age = sentiment.age_seconds(now)
+    stale = maximum_age_seconds is not None and age > maximum_age_seconds
+    if stale:
+        return {"sentiment_age_seconds": age, "sentiment_stale": True}
+    return {
+        "sentiment_score": sentiment.score,
+        "sentiment_fear_greed": sentiment.fear_greed,
+        "funding_rate": sentiment.funding_rate,
+        "open_interest_change_24h": sentiment.open_interest_change_24h,
+        "sentiment_age_seconds": age,
+        "sentiment_stale": False,
+    }

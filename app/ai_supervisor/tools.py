@@ -54,6 +54,14 @@ def build_gateway(engine) -> ToolGateway:
     async def get_risk_status() -> dict[str, Any]:
         return engine.payload().get("risk")
 
+    async def get_sentiment() -> dict[str, Any] | None:
+        """Observation-only sentiment snapshot (read-only, never trades)."""
+        return engine.payload().get("sentiment")
+
+    async def get_strategy_selection() -> dict[str, Any] | None:
+        """Read-only strategy selection snapshot; never affects trading."""
+        return engine.payload().get("strategy_selection")
+
     async def get_execution_metrics() -> dict[str, Any]:
         risk = engine.payload().get("risk", {})
         orders = engine.payload().get("orders", [])
@@ -81,6 +89,8 @@ def build_gateway(engine) -> ToolGateway:
         ("get_recent_trades", "Recently closed trades.", get_recent_trades),
         ("get_recent_events", "Recent system events.", get_recent_events),
         ("get_risk_status", "Risk status and last decision.", get_risk_status),
+        ("get_sentiment", "Observation-only sentiment snapshot (never trades).", get_sentiment),
+        ("get_strategy_selection", "Read-only strategy selection snapshot (never trades).", get_strategy_selection),
         ("get_execution_metrics", "Execution and order metrics.", get_execution_metrics),
     ]
     for name, description, handler in read_only:

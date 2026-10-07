@@ -472,7 +472,7 @@ handoff (`LIVE_HANDOFF_COMPLETED`) and reports the gap; a gap larger than
 `max_gap_candles` sets `data_integrity` unhealthy and blocks entries.
 
 **Freshness vs risk policy.** `market_data.freshness` *measures* freshness
-(`threshold_seconds`, used by health/dashboard); `risk.stale_market_data`
+(`threshold_seconds`, used by health/dashboard); `risk.stale_market_data` (deprecated; FreshnessPolicy owns the effective threshold)
 decides whether staleness *blocks entries*, and `freshness.stale_action` chooses
 `block_entries` (default, fail-closed) or `warn_only`.
 
@@ -540,7 +540,7 @@ Leaving them unset keeps the safe offline defaults (`history.provider: none`).
 
 - **Freshness is measured per stream** — `bar_freshness`, `quote_freshness`,
   `trade_freshness` are reported separately and never merged into one timestamp.
-  Entry blocking still uses the risk threshold (`risk.stale_market_data`) and
+  Entry blocking still uses the risk threshold (`risk.stale_market_data` (deprecated; FreshnessPolicy owns the effective threshold)) and
   now keys off **bar** freshness when bars are enabled.
 - **Coverage is explicit** — `requested / received / coverage% / first / last /
   missing_intervals / largest_gap / gap_count` with a `PASS|WARNING|FAIL` verdict.
@@ -566,7 +566,7 @@ enabled on normal startup. Fault injection happens locally — the Alpaca server
 never manipulated.
 
 Known measured issue: `market_data.freshness.threshold_seconds` (30 s) and
-`risk.stale_market_data.maximum_age_seconds` (5 s) are **smaller than the 60 s bar
+`risk.stale_market_data.maximum_age_seconds` (deprecated=5 s, FreshnessPolicy owns the effective threshold) are **smaller than the 60 s bar
 cadence**, so a healthy bar stream still reads as stale between minute
 boundaries. Retune before enabling execution.
 
@@ -653,7 +653,7 @@ Secrets (never in `config.yaml`): `ALPACA_API_KEY`, `ALPACA_API_SECRET`,
   A natural next step is to subscribe to **1-minute bars** on the live stream too,
   which would make live candles deterministic.
 - `market_data.freshness.threshold_seconds` (30 s) is the *measurement*; the
-  blocking threshold remains `risk.stale_market_data.maximum_age_seconds` (5 s),
+  blocking threshold remains `risk.stale_market_data.maximum_age_seconds` (deprecated=5 s, FreshnessPolicy owns the effective threshold),
   which is intentionally tight for a sparse feed and needs review before
   execution is ever enabled.
 - The AI supervisor is optional and cannot flatten or trade; it is a read-only

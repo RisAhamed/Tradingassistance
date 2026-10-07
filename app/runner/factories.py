@@ -18,36 +18,9 @@ from app.storage.repository import Repository
 
 
 def create_provider(config: AppConfig, env: EnvSettings, bus=None) -> MarketDataProvider:
-    provider = config.market_data.provider
-    if provider == "mock":
-        # 1 tick = a fixed span of market time (config-driven) so candle
-        # timeframes roll quickly enough to warm up the regime classifier.
-        mock = config.market_data.mock
-        return MockMarketDataProvider(
-            config.trading.symbol,
-            spread_percent=config.risk.maximum_spread_percent,
-            tick_seconds=mock.tick_seconds,
-            seed=mock.seed,
-            bars_enabled=config.market_data.bars.enabled,
-            bar_timeframe=config.market_data.bars.timeframe,
-        )
-    if provider == "alpaca":
-        if not env.has_alpaca_credentials():
-            raise ConfigError("Alpaca market-data credentials missing (ALPACA_API_KEY / ALPACA_API_SECRET)")
-        from app.market_data.alpaca_provider import AlpacaMarketDataProvider
+    from app.market_data.registry import build_provider
 
-        # The single Alpaca market-data adapter (Phase B). Credentials come from
-        # the environment only and are never logged or embedded in events.
-        return AlpacaMarketDataProvider(
-            env.alpaca_api_key,
-            env.alpaca_api_secret,
-            feed=config.market_data.feed,
-            reconnect=config.market_data.reconnect,
-            bus=bus,
-            bars_enabled=config.market_data.bars.enabled,
-            bar_timeframe=config.market_data.bars.timeframe,
-        )
-    raise ConfigError(f"unsupported market data provider: {provider}")
+    return build_provider(config, env, bus)
 
 
 def create_broker(config: AppConfig, env: EnvSettings) -> BrokerAdapter:
@@ -59,22 +32,9 @@ def create_broker(config: AppConfig, env: EnvSettings) -> BrokerAdapter:
             fee_percent=0.0,
             slippage_percent=config.backtesting.slippage_percent,
         )
-    broker = config.trading.broker
-    if broker == "mock":
-        return MockBroker(
-            starting_equity=config.backtesting.initial_capital,
-            fee_percent=0.0,
-            slippage_percent=config.backtesting.slippage_percent,
-        )
-    if broker == "alpaca":
-        if not env.has_alpaca_credentials():
-            raise ConfigError("Alpaca paper credentials missing (ALPACA_API_KEY / ALPACA_API_SECRET)")
-        from app.brokers.alpaca import AlpacaPaperBroker
+    from app.brokers.registry import build_broker
 
-        return AlpacaPaperBroker(
-            env.alpaca_api_key, env.alpaca_api_secret, feed=config.market_data.feed
-        )
-    raise ConfigError(f"unsupported broker: {broker}")
+    return build_broker(config, env)
 
 
 def create_storage(config: AppConfig, env: EnvSettings) -> tuple[Database | None, Repository]:
@@ -85,4 +45,28 @@ def create_storage(config: AppConfig, env: EnvSettings) -> tuple[Database | None
     return database, Repository(database.session_factory, database=database)
 
 
-__all__ = ["create_provider", "create_broker", "create_storage"]
+def create_sentiment_provider(config: AppConfig, env: EnvSettings):
+    """Build the configured observation-only sentiment provider.
+
+    Selection goes through the sentiment registry (decorator + dict), never
+    an ``if/elif`` chain on the provider name. Returns ``None`` when the
+    layer is disabled — the engine then skips polling entirely.
+    """
+    from app.sentiment import mock as _sentiment_mock  # noqa: F401  (registration side effects)
+    from app.sentiment.providers import fear_greed as _sentiment_fg  # noqa: F401
+    from app.sentiment.providers import none as _sentiment_none  # noqa: F401
+    from app.sentiment.registry import build_sentiment_provider as _build
+
+    sentiment = config.sentiment
+    if not sentiment.enabled or sentiment.provider == "none":
+        return None
+    # Per-provider constructor kwargs (registry still owns selection).
+    kwargs: dict = {}
+    if sentiment.provider == "mock":
+        kwargs["seed"] = sentiment.mock_seed
+    elif sentiment.provider == "fear_greed":
+        kwargs["http_timeout_seconds"] = sentiment.http_timeout_seconds
+    return _build(sentiment.provider, **kwargs)
+
+
+__all__ = ["create_provider", "create_broker", "create_storage", "create_sentiment_provider"]

@@ -51,6 +51,7 @@ class EventType(str, Enum):
     CANDLE_COMPLETED = "CandleCompleted"
     CANDLE_REJECTED = "CandleRejected"
     STRATEGY_EVALUATED = "StrategyEvaluated"
+    STRATEGY_SELECTED = "StrategySelected"
     RISK_EVALUATED = "RiskEvaluated"
     EXECUTION_DISABLED = "ExecutionDisabled"
     EXECUTION_BLOCKED = "ExecutionBlocked"
@@ -137,6 +138,10 @@ class EventType(str, Enum):
     EXPERIMENT_HALTED = "ExperimentHalted"
     EXPERIMENT_COMPLETED = "ExperimentCompleted"
     SAFETY_KILL = "SafetyKill"
+    # Phase E — observation-only sentiment layer (no trading semantics)
+    SENTIMENT_UPDATED = "SentimentUpdated"
+    SENTIMENT_STALE = "SentimentStale"
+    SENTIMENT_UNAVAILABLE = "SentimentUnavailable"
 
 
 class Event(BaseModel):

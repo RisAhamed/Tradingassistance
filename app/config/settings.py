@@ -51,6 +51,11 @@ class EnvSettings(BaseSettings):
     # --- Optional enrichment ---
     quiver_api_key: str | None = None
 
+    # --- Sentiment providers (Phase E, observation-only) ---
+    # Optional token for a sentiment provider that requires one. Never logged,
+    # never embedded in events or payloads. Unused by the default provider.
+    sentiment_api_token: str | None = None
+
     # ----- helpers ---------------------------------------------------------
     def secret_values(self) -> list[str]:
         """Return non-empty secrets so logging can redact them."""
@@ -59,6 +64,7 @@ class EnvSettings(BaseSettings):
             self.alpaca_api_secret,
             self.ollama_api_key,
             self.quiver_api_key or "",
+            self.sentiment_api_token or "",
         ]
         return [value for value in candidates if value]
 
@@ -89,6 +95,7 @@ class EnvSettings(BaseSettings):
             "ollama_api_key": _mask(self.ollama_api_key),
             "ollama_model": self.ollama_model,
             "database_url": _mask(self.database_url),
+            "sentiment_api_token": _mask(self.sentiment_api_token),
             "config_path": self.config_path,
         }
 
