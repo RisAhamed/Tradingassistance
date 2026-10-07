@@ -587,7 +587,7 @@ Key non-secret knobs in `configs/config.yaml`:
 | `regime` | `ema_distance_atr_min`, volatility thresholds, `min_candles` |
 | `strategy` | breakout buffer, RSI bands, EMA pairs, spread limit, cooldown |
 | `risk` | `risk_per_trade_percent`, `maximum_daily_loss_percent`, `maximum_open_positions`, `maximum_position_value_percent`, `maximum_orders_per_session`, stop ATR multiplier, RR ratio |
-| `position_sizing` | method, risk %, min/max quantity, precision |
+| `position_sizing` | method, risk %, min/max quantity, precision, `confidence` (enabled, min/max_multiplier — conviction only down-scales the risk budget, never gates entries) |
 | `execution` | **`enabled` (PHASE B master gate, default `false`)**, order type, shorting, retry, duplicate-order protection |
 | `session` / `session_closeout` | session times, `entry_cutoff`, `flatten_deadline`, flatten retries |
 | `market_data` | provider, feed, reconnect, `max_age_seconds`, and the `mock` block (`tick_seconds`, `seed`) used by the offline demo |

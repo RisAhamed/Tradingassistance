@@ -495,6 +495,25 @@ class RiskConfig(_Section):
     maximum_spread_percent: float = 0.10
 
 
+class PositionSizingConfidenceConfig(_Section):
+    """Conviction sizing (Phase G): scales the risk budget from a ceiling.
+
+    ``risk_per_trade_percent`` remains the ceiling — conviction only ever
+    *reduces* exposure. ``effective = risk_percent * lerp(min, max, conf)``.
+    """
+    enabled: bool = True
+    min_multiplier: float = 0.25
+    max_multiplier: float = 1.00
+
+    @model_validator(mode="after")
+    def _bounds(self) -> "PositionSizingConfidenceConfig":
+        if not (0.0 < self.min_multiplier <= self.max_multiplier <= 1.0):
+            raise ValueError(
+                "position_sizing.confidence requires 0 < min_multiplier <= max_multiplier <= 1.0"
+            )
+        return self
+
+
 class PositionSizingConfig(_Section):
     method: str = "risk_based"
     # Deprecated compatibility field for direct programmatic construction.
@@ -503,6 +522,7 @@ class PositionSizingConfig(_Section):
     minimum_quantity: float = 0.000001
     maximum_quantity: float = 100.0
     quantity_precision: int = 6
+    confidence: PositionSizingConfidenceConfig = Field(default_factory=PositionSizingConfidenceConfig)
 
 
 class SlippageConfig(_Section):

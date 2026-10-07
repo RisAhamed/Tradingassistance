@@ -60,6 +60,9 @@ class TradePlan(BaseModel):
     status: TradePlanStatus = TradePlanStatus.WAIT
     correlation_id: str | None = None
     session_id: str | None = None
+    # Phase G: signal conviction carried through for audit (never gates entries).
+    confidence: float | None = None
+    confidence_components: dict[str, float] = Field(default_factory=dict)
     extra: dict[str, Any] = Field(default_factory=dict)
 
     # --- lifecycle tracking ---

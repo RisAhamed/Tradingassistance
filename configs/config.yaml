@@ -228,6 +228,12 @@ position_sizing:
   minimum_quantity: 0.000001
   maximum_quantity: 100.0
   quantity_precision: 6
+  # Phase G: conviction sizing. risk_per_trade_percent stays the ceiling;
+  # confidence only scales the risk budget DOWN from it.
+  confidence:
+    enabled: true
+    min_multiplier: 0.25
+    max_multiplier: 1.00
 
 execution:
   # PHASE B MASTER GATE. When false: market data, features, regime, strategy,

@@ -16,8 +16,14 @@ from app.strategies.registry import build_strategy, known_strategies
 
 
 class StrategyOrchestrator:
-    def __init__(self, config: StrategySelectionConfig) -> None:
+    def __init__(self, config: StrategySelectionConfig, strategy_config: StrategyConfig | None = None) -> None:
+        # ``strategy_config`` is the FULL StrategyConfig loaded from
+        # configs/config.yaml. When provided, it is preserved across per-name
+        # instantiation via model_copy(update={"name": N}); the cache key is
+        # still the resolved name N, and the cached instance carries the exact
+        # full config (no Pydantic defaults for operational fields).
         self.config = config
+        self._strategy_config = strategy_config
         self._cache: dict[str, Any] = {}
         self._last: dict[str, Any] = {
             "mode": config.mode,
@@ -38,7 +44,14 @@ class StrategyOrchestrator:
 
     def strategy_for(self, name: str) -> Any:
         if name not in self._cache:
-            self._cache[name] = build_strategy(StrategyConfig(name=name))
+            if self._strategy_config is not None:
+                full = self._strategy_config.model_copy(update={"name": name})
+                self._cache[name] = build_strategy(full)
+            else:
+                # Backwards-compatible fallback for pre-D.5.6 construction paths.
+                self._cache[name] = build_strategy(StrategyConfig(name=name))
+        # Cached by name N; each cached strategy holds the SAME full config
+        # fields from the loaded YAML, only ``name`` is updated.
         return self._cache[name]
 
     def resolve(self, regime: Regime) -> Any:

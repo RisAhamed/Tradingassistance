@@ -2,6 +2,9 @@
 
 Conceptually: ``risk_amount / stop_distance``, then normalised to the broker's
 quantity constraints. Every intermediate value is logged by the caller.
+
+Phase G: the risk budget is scaled DOWN from the ``risk_percent`` ceiling by
+the signal's confidence (conviction sizing). The ceiling is never exceeded.
 """
 from __future__ import annotations
 
@@ -20,6 +23,11 @@ class SizingResult:
     normalized_quantity: float
     final_quantity: float
     rejected_reason: str | None = None
+    # Phase G: conviction provenance. effective_risk_percent is the ceiling
+    # actually used; it can never exceed risk_percent.
+    confidence: float = 0.0
+    confidence_multiplier: float = 1.0
+    effective_risk_percent: float | None = None
 
     @property
     def final_risk_amount(self) -> float:
@@ -37,6 +45,22 @@ class PositionSizer:
         self.risk_percent = risk_percent if risk_percent is not None else (
             config.risk_per_trade_percent if config.risk_per_trade_percent is not None else 0.5
         )
+
+    def _conviction(self, signal: StrategySignal) -> tuple[float, float]:
+        """Return (multiplier, effective_risk_percent) for this signal.
+
+        Phase G: conviction only DOWN-scales the risk_percent ceiling.
+        Disabled mode reproduces the pre-G result exactly (multiplier 1.0).
+        """
+        confidence_cfg = getattr(self.config, "confidence", None)
+        confidence = signal.confidence if signal.confidence is not None else 0.0
+        confidence = max(0.0, min(1.0, float(confidence)))
+        if confidence_cfg is None or not confidence_cfg.enabled:
+            return 1.0, self.risk_percent
+        multiplier = confidence_cfg.min_multiplier + (
+            confidence_cfg.max_multiplier - confidence_cfg.min_multiplier
+        ) * confidence
+        return multiplier, self.risk_percent * multiplier
 
     def size(
         self,
@@ -59,12 +83,23 @@ class PositionSizer:
         if signal.entry_reference is not None and not _finite_nonnegative(signal.entry_reference):
             return SizingResult(equity, 0.0, stop_distance, 0.0, 0.0, 0.0, "invalid_entry_reference")
 
-        risk_budget = equity * (self.risk_percent / 100.0)
+        multiplier, effective_risk_percent = self._conviction(signal)
+        conf = signal.confidence if signal.confidence is not None else 0.0
+        risk_budget = equity * (effective_risk_percent / 100.0)
+        # Phase G safety: conviction can only reduce — the scaled budget must
+        # never exceed the risk_percent ceiling.
+        ceiling = equity * (self.risk_percent / 100.0)
+        assert risk_budget <= ceiling + 1e-9, "conviction sizing exceeded the risk_percent ceiling"
+        risk_budget = min(risk_budget, ceiling)
         if not _finite_nonnegative(risk_budget) or risk_budget <= 0:
-            return SizingResult(equity, 0.0, stop_distance, 0.0, 0.0, 0.0, "invalid_risk_budget")
+            return SizingResult(
+                equity, 0.0, stop_distance, 0.0, 0.0, 0.0, "invalid_risk_budget",
+                conf, multiplier, effective_risk_percent,
+            )
         raw_quantity = risk_budget / stop_distance
         if not _finite_positive(raw_quantity):
-            return SizingResult(equity, risk_budget, stop_distance, 0.0, 0.0, 0.0, "invalid_raw_quantity")
+            return SizingResult(equity, risk_budget, stop_distance, 0.0, 0.0, 0.0, "invalid_raw_quantity",
+                                conf, multiplier, effective_risk_percent)
         if reference_price is not None and not _finite_nonnegative(reference_price):
             return SizingResult(equity, risk_budget, stop_distance, raw_quantity, 0.0, 0.0, "invalid_reference_price")
         if max_notional is not None and not _finite_nonnegative(max_notional):
@@ -72,7 +107,8 @@ class PositionSizer:
         normalized = self._normalize(raw_quantity)
         if normalized <= 0:
             return SizingResult(
-                equity, risk_budget, stop_distance, raw_quantity, normalized, 0.0, "below_minimum_quantity"
+                equity, risk_budget, stop_distance, raw_quantity, normalized, 0.0, "below_minimum_quantity",
+                conf, multiplier, effective_risk_percent,
             )
         # Authoritative exposure cap: quantity * price must stay within the
         # configured maximum position value. Applied here (post-sizing) where
@@ -91,6 +127,7 @@ class PositionSizer:
                     normalized,
                     0.0,
                     "max_exposure",
+                    conf, multiplier, effective_risk_percent,
                 )
             if normalized * price > max_notional:
                 normalized = cap_qty
@@ -103,10 +140,13 @@ class PositionSizer:
                         cap_qty,
                         0.0,
                         "max_exposure",
+                        conf, multiplier, effective_risk_percent,
                     )
         if not _finite_positive(normalized):
-            return SizingResult(equity, risk_budget, stop_distance, raw_quantity, 0.0, 0.0, "invalid_normalized_quantity")
-        return SizingResult(equity, risk_budget, stop_distance, raw_quantity, normalized, normalized)
+            return SizingResult(equity, risk_budget, stop_distance, raw_quantity, 0.0, 0.0, "invalid_normalized_quantity",
+                                conf, multiplier, effective_risk_percent)
+        return SizingResult(equity, risk_budget, stop_distance, raw_quantity, normalized, normalized,
+                            None, conf, multiplier, effective_risk_percent)
 
     def _normalize(self, quantity: float) -> float:
         if not _finite_nonnegative(quantity):

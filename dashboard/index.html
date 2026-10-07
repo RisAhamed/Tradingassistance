@@ -126,7 +126,10 @@
 
         show("system", system); show("mdata", md); show("warm", warm); show("handoff", handoff); show("candles", handoff.candles || {}); show("recovery", handoff.recovery || {}); show("logging", loggingState); show("exec", exec); show("ready", ready); show("market", market);
         show("features", features); show("regime", regime);
-        show("strategy", strategy);
+        const _sig = (strategy && strategy.last_signal) || {};
+        const _conf = _sig.confidence;
+        const _confLine = "confidence: " + (_conf === undefined || _conf === null ? "n/a" : Number(_conf).toFixed(2) + " (components visible in /api/decision)") + "\n";
+        show("strategy", _confLine + JSON.stringify(strategy, null, 2));
         show("strategy-selection", (strategy && strategy.strategy_selection) || {}); show("risk", risk); show("position", positions);
         show("pnl", pnl); show("orders", orders); show("sess", session); show("ai", ai);
         // Phase D

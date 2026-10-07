@@ -330,6 +330,8 @@ class Repository:
                         reason_codes=reason_codes,
                         invalidation_reason=plan.get("invalidation_reason"),
                         source_signal_id=(plan.get("extra") or {}).get("source_signal_id"),
+                        confidence=plan.get("confidence"),
+                        confidence_components=plan.get("confidence_components") or {},
                         payload=plan,
                     )
                 )
@@ -343,6 +345,8 @@ class Repository:
                 row.quantity = quantity
                 row.invalidation_reason = plan.get(
                     "invalidation_reason", row.invalidation_reason)
+                row.confidence = plan.get("confidence", row.confidence)
+                row.confidence_components = plan.get("confidence_components", row.confidence_components)
                 row.reason_codes = reason_codes
                 row.payload = plan
 

@@ -153,7 +153,7 @@ class TradingEngine:
 
         strategy = build_strategy(config.strategy)
         self.strategy = strategy
-        self.orchestrator = StrategyOrchestrator(config.strategy.selection)
+        self.orchestrator = StrategyOrchestrator(config.strategy.selection, strategy_config=config.strategy)
         self._generator_cache: dict[str, SignalGenerator] = {}
         self.generator = SignalGenerator(strategy, config.risk)
         self.risk_engine = RiskEngine(
@@ -1377,7 +1377,9 @@ class TradingEngine:
         self._trace(
             "STRATEGY", "PASS", decision="SIGNAL", reason=signal.reason,
             inputs={"strategy": signal.strategy, "timeframe": self.config.timeframes.signal},
-            output={"signal_id": signal.signal_id, "direction": signal.direction.value},
+            output={"signal_id": signal.signal_id, "direction": signal.direction.value,
+                    "confidence": signal.confidence,
+                    "confidence_components": signal.confidence_components},
         )
         self._trace(
             "SIGNAL", "PASS", decision=signal.direction.value.upper(), reason=signal.reason,
@@ -2225,6 +2227,9 @@ class TradingEngine:
                     "raw_quantity": round(sizing.raw_quantity, 8),
                     "normalized_quantity": round(sizing.normalized_quantity, 8),
                     "final_quantity": round(sizing.final_quantity, 8),
+                    "confidence": sizing.confidence,
+                    "confidence_multiplier": round(sizing.confidence_multiplier, 6),
+                    "effective_risk_percent": sizing.effective_risk_percent,
                 }
             },
         )
@@ -2254,6 +2259,9 @@ class TradingEngine:
                 "minimum_quantity": self.config.position_sizing.minimum_quantity,
                 "maximum_quantity": self.config.position_sizing.maximum_quantity,
                 "quantity_precision": self.config.position_sizing.quantity_precision,
+                "confidence": sizing.confidence,
+                "confidence_multiplier": sizing.confidence_multiplier,
+                "effective_risk_percent": sizing.effective_risk_percent,
             },
         )
         if not self.execution_enabled:

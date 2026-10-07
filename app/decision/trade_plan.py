@@ -108,6 +108,9 @@ class TradePlanBuilder:
             status=status,
             correlation_id=correlation_id,
             session_id=session_id,
+            # Phase G: carry signal conviction through for audit.
+            confidence=signal.confidence,
+            confidence_components=dict(getattr(signal, "confidence_components", {}) or {}),
             # Phase D.1: persist the market context + provenance so the
             # decision can be reconstructed after a restart.
             extra={

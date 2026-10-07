@@ -137,7 +137,7 @@ class BacktestEngine:
 
         strategy = build_strategy(config.strategy)
         self.generator = SignalGenerator(strategy, config.risk)
-        self.orchestrator = StrategyOrchestrator(config.strategy.selection)
+        self.orchestrator = StrategyOrchestrator(config.strategy.selection, strategy_config=config.strategy)
         self._generator_cache: dict[str, SignalGenerator] = {}
         self._orch_strategy = strategy
         self.risk_engine = RiskEngine(

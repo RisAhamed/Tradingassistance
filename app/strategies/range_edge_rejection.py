@@ -8,6 +8,12 @@ positional (trapped breakdown sellers must cover), not predictive.
 Thresholds reuse the frozen ``strategy.mean_reversion`` section
 (recovery_min, rsi_max_long); no H2-specific parameters exist. This
 strategy makes NO profitability claims.
+
+Phase G confidence (deterministic, bar-t only, no look-ahead):
+  touch_margin    = clamp((range_low - low) / (0.5 * atr), 0, 1)
+  recovery_margin = clamp((recovery - recovery_min) / (1 - recovery_min), 0, 1)
+  rsi_margin      = clamp((rsi_max_long - rsi) / rsi_max_long, 0, 1)
+  confidence      = equally-weighted mean of the three margins.
 """
 from __future__ import annotations
 
@@ -102,6 +108,21 @@ class RangeEdgeRejectionStrategy(Strategy):
         reasons: list[ReasonCode],
         entry_reference: float,
     ) -> StrategySignal:
+        features = context.features
+        cfg = self.config.mean_reversion
+        margins = {
+            "touch_margin": _clamp((features.range_low - features.low) / (0.5 * features.atr), 0.0, 1.0),
+            "recovery_margin": _clamp(
+                ((features.close - features.low) / (features.high - features.low) - cfg.recovery_min)
+                / (1.0 - cfg.recovery_min),
+                0.0,
+                1.0,
+            ),
+            "rsi_margin": _clamp((cfg.rsi_max_long - features.rsi) / cfg.rsi_max_long, 0.0, 1.0),
+        }
+        components = dict(margins)
+        components.update({f"_weight_{name}": 1.0 / len(margins) for name in margins})
+        confidence = sum(margins.values()) / len(margins)
         return StrategySignal(
             signal_id=new_signal_id(),
             timestamp=context.now,
@@ -113,7 +134,13 @@ class RangeEdgeRejectionStrategy(Strategy):
             entry_reference=entry_reference,
             timeframe=context.timeframe,
             regime=context.regime.regime,
+            confidence=max(0.0, min(1.0, confidence)),
+            confidence_components=components,
             features=context.features.numeric_values(),
             correlation_id=context.correlation_id,
             session_id=context.session_id,
         )
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))

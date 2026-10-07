@@ -62,6 +62,18 @@ def build_gateway(engine) -> ToolGateway:
         """Read-only strategy selection snapshot; never affects trading."""
         return engine.payload().get("strategy_selection")
 
+    async def get_signal_confidence() -> dict[str, Any] | None:
+        """Read-only last-signal conviction; never affects trading."""
+        signal = (engine.payload().get("strategy") or {}).get("last_signal")
+        if signal is None:
+            return None
+        return {
+            "signal_id": signal.get("signal_id"),
+            "strategy": signal.get("strategy"),
+            "confidence": signal.get("confidence"),
+            "confidence_components": signal.get("confidence_components"),
+        }
+
     async def get_execution_metrics() -> dict[str, Any]:
         risk = engine.payload().get("risk", {})
         orders = engine.payload().get("orders", [])
@@ -91,6 +103,7 @@ def build_gateway(engine) -> ToolGateway:
         ("get_risk_status", "Risk status and last decision.", get_risk_status),
         ("get_sentiment", "Observation-only sentiment snapshot (never trades).", get_sentiment),
         ("get_strategy_selection", "Read-only strategy selection snapshot (never trades).", get_strategy_selection),
+        ("get_signal_confidence", "Read-only last-signal conviction score and components (never trades).", get_signal_confidence),
         ("get_execution_metrics", "Execution and order metrics.", get_execution_metrics),
     ]
     for name, description, handler in read_only:

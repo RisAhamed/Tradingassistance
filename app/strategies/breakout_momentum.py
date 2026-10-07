@@ -5,6 +5,17 @@ LONG  : close breaks above the recent range high, momentum confirms, regime is
 SHORT : symmetric to the downside.
 
 This strategy makes NO profitability claims. Thresholds come from configuration.
+
+Phase G confidence (deterministic, bar-t only, no look-ahead):
+  breakout_margin = min(1, (close - threshold) / (0.5 * atr)) when the close
+                    is beyond the buffered threshold, else 0.
+  momentum_margin = triangular score of RSI inside its configured long/short
+                    band — 0 at the band edges, 1 at the band centre.
+  trend_margin    = clamp(ema_distance_atr / _EMA_DISTANCE_ATR_MIN, 0, 1),
+                    where ema_distance_atr = |fast_ema - slow_ema| / atr.
+  spread_margin   = clamp(1 - spread_percent / max_spread, 0, 1), or 1.0 when
+                    the spread is not measurable (backtest has no quotes).
+  confidence      = equally-weighted mean of the four margins.
 """
 from __future__ import annotations
 
@@ -13,6 +24,11 @@ from app.core.ids import new_signal_id
 from app.domain.enums import Direction, ReasonCode
 from app.domain.signals import StrategySignal
 from app.strategies.base import Strategy, StrategyContext
+
+# Reference threshold mirroring regime.trending.ema_distance_atr_min: the
+# margin only measures excess trend strength relative to the regime gate.
+_EMA_DISTANCE_ATR_MIN = 0.25
+_CONFIDENCE_WEIGHT = 0.25
 
 
 class BreakoutMomentumStrategy(Strategy):
@@ -172,6 +188,7 @@ class BreakoutMomentumStrategy(Strategy):
         reasons: list[ReasonCode],
         entry_reference: float,
     ) -> StrategySignal:
+        confidence, components = self._confidence(context, direction, entry_reference)
         return StrategySignal(
             signal_id=new_signal_id(),
             timestamp=context.now,
@@ -183,7 +200,54 @@ class BreakoutMomentumStrategy(Strategy):
             entry_reference=entry_reference,
             timeframe=context.timeframe,
             regime=context.regime.regime,
+            confidence=confidence,
+            confidence_components=components,
             features=context.features.numeric_values(),
             correlation_id=context.correlation_id,
             session_id=context.session_id,
         )
+
+    def _confidence(
+        self, context: StrategyContext, direction: Direction, close: float
+    ) -> tuple[float, dict[str, float]]:
+        """Deterministic conviction from the same margins the entry used."""
+        atr = context.features.atr or 0.0
+        buffer = self.config.breakout.buffer_percent / 100.0
+        if direction is Direction.LONG:
+            threshold = (context.features.range_high or 0.0) * (1.0 + buffer)
+            lo, hi = self.config.momentum.rsi_min_long, self.config.momentum.rsi_max_long
+        else:
+            threshold = (context.features.range_low or 0.0) * (1.0 - buffer)
+            lo, hi = self.config.momentum.rsi_min_short, self.config.momentum.rsi_max_short
+        breakout_margin = (
+            min(1.0, (close - threshold) / (0.5 * atr))
+            if atr > 0 and close > threshold
+            else 0.0
+        )
+        rsi = context.features.rsi
+        momentum_margin = 0.0
+        if rsi is not None and hi > lo:
+            center = (lo + hi) / 2.0
+            half = (hi - lo) / 2.0
+            momentum_margin = max(0.0, 1.0 - abs(rsi - center) / half)
+        fast = context.features.ema(self.config.trend.fast_ema)
+        slow = context.features.ema(self.config.trend.slow_ema)
+        trend_margin = 0.0
+        if atr > 0 and fast is not None and slow is not None:
+            trend_margin = min(1.0, abs(fast - slow) / atr / _EMA_DISTANCE_ATR_MIN)
+        spread_pct = context.features.spread_percent
+        spread_margin = (
+            1.0
+            if spread_pct is None
+            else max(0.0, min(1.0, 1.0 - spread_pct / self.config.spread.maximum_percent))
+        )
+        margins = {
+            "breakout_margin": breakout_margin,
+            "momentum_margin": momentum_margin,
+            "trend_margin": trend_margin,
+            "spread_margin": spread_margin,
+        }
+        components = dict(margins)
+        components.update({f"_weight_{name}": _CONFIDENCE_WEIGHT for name in margins})
+        confidence = sum(margins.values()) / len(margins)
+        return max(0.0, min(1.0, confidence)), components

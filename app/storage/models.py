@@ -186,6 +186,10 @@ class TradePlanRow(Base):
     reason_codes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     invalidation_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
     source_signal_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Phase G: signal conviction (nullable; SQLite create_all adds these on
+    # fresh DBs — existing DBs keep NULLs, values remain in `payload`).
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_components: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
