@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 
 from app.backtesting.data import generate_history, load_csv
 from app.backtesting.engine import BacktestEngine
@@ -18,6 +19,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=7, help="synthetic data seed")
     parser.add_argument("--symbol", type=str, default=None, help="override symbol")
     parser.add_argument("--pretty", action="store_true", help="pretty-print the result")
+    parser.add_argument("--reference-start", type=str, default=None,
+                        help="fixed ISO-8601 data anchor (overrides backtesting.reference_start)")
     args = parser.parse_args()
 
     env = get_env()
@@ -30,9 +33,22 @@ def main() -> None:
     if args.csv:
         candles = load_csv(args.csv, symbol=config.trading.symbol, timeframe=timeframe)
         source = args.csv
+        print("DATA_ANCHOR=csv (source file determines timestamps)")
     else:
-        candles = generate_history(config.trading.symbol, timeframe=timeframe, length=args.length, seed=args.seed)
-        source = f"synthetic(seed={args.seed}, length={args.length})"
+        anchor = args.reference_start or config.backtesting.reference_start
+        start = None
+        if anchor:
+            # G.1: fixed anchor → same seed + same anchor + same length is
+            # byte-identical forever, regardless of wall-clock time.
+            start = datetime.fromisoformat(str(anchor).replace("Z", "+00:00"))
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            print(f"DATA_ANCHOR=reference_start={start.isoformat()} (reproducible)")
+            source = f"synthetic(seed={args.seed}, length={args.length}, reference_start={start.isoformat()})"
+        else:
+            print("DATA_ANCHOR=utcnow-anchored (non-reproducible)")
+            source = f"synthetic(seed={args.seed}, length={args.length})"
+        candles = generate_history(config.trading.symbol, timeframe=timeframe, length=args.length, seed=args.seed, start=start)
 
     result = BacktestEngine(config).run(candles)
     payload = {"source": source, "symbol": config.trading.symbol, "timeframe": timeframe, **result.to_dict()}

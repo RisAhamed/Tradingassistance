@@ -43,7 +43,7 @@ def _ctx(strategy, features, regime):
 
     return StrategyContext(
         symbol=SYMBOL, timeframe="5m", features=features, regime=regime,
-        now=utcnow(), position_open=False,
+        now=utcnow(), ema_distance_atr_min=0.25, position_open=False,
     )
 
 

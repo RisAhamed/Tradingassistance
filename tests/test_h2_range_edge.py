@@ -62,6 +62,7 @@ def _context(features=None, regime=None, position_open=False) -> StrategyContext
         features=features or _features(),
         regime=regime or _regime(Regime.LOW_VOLATILITY),
         now=utcnow(),
+        ema_distance_atr_min=0.25,
         position_open=position_open,
     )
 
@@ -294,7 +295,8 @@ def test_backtest_and_live_windows_agree():
         live_snap = live_engine.compute(list(candles[: i + 1]), timeframe="5m")
         assert replay_snap.range_low == live_snap.range_low
         assert replay_snap.close == live_snap.close
-        ctx_kwargs = dict(symbol="BTC/USD", timeframe="5m", now=candles[i].timestamp)
+        ctx_kwargs = dict(symbol="BTC/USD", timeframe="5m", now=candles[i].timestamp,
+                          ema_distance_atr_min=0.25)
         r1 = strategy.evaluate(StrategyContext(features=replay_snap, regime=_regime(Regime.LOW_VOLATILITY), **ctx_kwargs))
         r2 = strategy.evaluate(StrategyContext(features=live_snap, regime=_regime(Regime.LOW_VOLATILITY), **ctx_kwargs))
         assert (r1 is None) == (r2 is None)

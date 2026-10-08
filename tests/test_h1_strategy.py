@@ -62,6 +62,7 @@ def _context(features=None, regime=None, position_open=False) -> StrategyContext
         features=features or _features(),
         regime=regime or _regime(Regime.LOW_VOLATILITY),
         now=utcnow(),
+        ema_distance_atr_min=0.25,
         position_open=position_open,
     )
 

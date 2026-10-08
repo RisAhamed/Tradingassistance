@@ -11,8 +11,9 @@ Phase G confidence (deterministic, bar-t only, no look-ahead):
                     is beyond the buffered threshold, else 0.
   momentum_margin = triangular score of RSI inside its configured long/short
                     band — 0 at the band edges, 1 at the band centre.
-  trend_margin    = clamp(ema_distance_atr / _EMA_DISTANCE_ATR_MIN, 0, 1),
-                    where ema_distance_atr = |fast_ema - slow_ema| / atr.
+  trend_margin    = clamp(ema_distance_atr / context.ema_distance_atr_min, 0, 1),
+                    where ema_distance_atr = |fast_ema - slow_ema| / atr and the
+                    reference comes from config.regime.trending via context.
   spread_margin   = clamp(1 - spread_percent / max_spread, 0, 1), or 1.0 when
                     the spread is not measurable (backtest has no quotes).
   confidence      = equally-weighted mean of the four margins.
@@ -25,9 +26,7 @@ from app.domain.enums import Direction, ReasonCode
 from app.domain.signals import StrategySignal
 from app.strategies.base import Strategy, StrategyContext
 
-# Reference threshold mirroring regime.trending.ema_distance_atr_min: the
-# margin only measures excess trend strength relative to the regime gate.
-_EMA_DISTANCE_ATR_MIN = 0.25
+# Equal conviction weights for the four margins.
 _CONFIDENCE_WEIGHT = 0.25
 
 
@@ -234,7 +233,7 @@ class BreakoutMomentumStrategy(Strategy):
         slow = context.features.ema(self.config.trend.slow_ema)
         trend_margin = 0.0
         if atr > 0 and fast is not None and slow is not None:
-            trend_margin = min(1.0, abs(fast - slow) / atr / _EMA_DISTANCE_ATR_MIN)
+            trend_margin = min(1.0, abs(fast - slow) / atr / context.ema_distance_atr_min)
         spread_pct = context.features.spread_percent
         spread_margin = (
             1.0

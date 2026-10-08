@@ -593,6 +593,9 @@ class BacktestingConfig(_Section):
     commission: float = 0
     slippage_percent: float = 0.05
     execution: BacktestingExecutionConfig = Field(default_factory=BacktestingExecutionConfig)
+    # G.1: fixed ISO-8601 anchor for reproducible synthetic history. null
+    # keeps the legacy utcnow-anchored (non-reproducible) behaviour.
+    reference_start: str | None = None
 
 class AiModelConfig(_Section):
     name: str = ""

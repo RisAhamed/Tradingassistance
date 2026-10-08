@@ -23,6 +23,7 @@ def _ctx(features, regime) -> StrategyContext:
         features=features,
         regime=regime,
         now=NOW,
+        ema_distance_atr_min=0.25,
         position_open=False,
     )
 

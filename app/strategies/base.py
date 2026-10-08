@@ -22,6 +22,11 @@ class StrategyContext:
     features: FeatureSnapshot
     regime: RegimeSnapshot
     now: datetime
+    # G.1: regime trend threshold, populated by the caller from
+    # config.regime.trending.ema_distance_atr_min. Deliberately NO default —
+    # omitting it is a programming error and must fail loudly at
+    # construction, never silently fall back to a magic number.
+    ema_distance_atr_min: float
     snapshot: MarketSnapshot | None = None
     position_open: bool = False
     correlation_id: str | None = None

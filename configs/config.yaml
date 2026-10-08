@@ -276,6 +276,9 @@ backtesting:
   initial_capital: 100000
   commission: 0
   slippage_percent: 0.05
+  # G.1: fixed ISO-8601 anchor for reproducible synthetic history;
+  # null keeps utcnow-anchored (non-reproducible) behaviour.
+  reference_start: null
   execution:
     spread_percent: 0.02
     slippage_percent: 0.05

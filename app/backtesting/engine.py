@@ -300,6 +300,8 @@ class BacktestEngine:
                     features=features,
                     regime=regime,
                     now=candle.timestamp,
+                    # G.1: same config-sourced threshold as the live engine.
+                    ema_distance_atr_min=self.config.regime.trending.ema_distance_atr_min,
                     position_open=False,
                     correlation_id=new_correlation_id(),
                 )

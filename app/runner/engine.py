@@ -1310,6 +1310,8 @@ class TradingEngine:
             features=features,
             regime=regime,
             now=now,
+            # G.1: regime threshold comes from config, never a magic number.
+            ema_distance_atr_min=self.config.regime.trending.ema_distance_atr_min,
             snapshot=self.store.snapshot(self.symbol),
             position_open=not self.position_manager.is_flat,
             correlation_id=new_correlation_id(),

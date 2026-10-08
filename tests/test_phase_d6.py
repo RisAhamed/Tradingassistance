@@ -159,6 +159,7 @@ def test_strategy_returns_none_on_unknown_regime():
         features=make_features(),
         regime=RegimeSnapshot(symbol="BTC/USD", timestamp=_base_time(), timeframe="5m", regime=Regime.UNKNOWN),
         now=_base_time(),
+        ema_distance_atr_min=0.25,
     )
     assert strategy.evaluate(ctx) is None
 
@@ -180,6 +181,7 @@ def test_strategy_emits_long_on_valid_breakout():
         features=features,
         regime=RegimeSnapshot(symbol="BTC/USD", timestamp=_base_time(), timeframe="5m", regime=Regime.TRENDING_BULLISH),
         now=_base_time(),
+        ema_distance_atr_min=0.25,
     )
     signal = strategy.evaluate(ctx)
     assert signal is not None
