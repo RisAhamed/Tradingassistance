@@ -263,6 +263,17 @@ paper_safety:
   max_orders_per_session: 3
   max_notional_exposure: 150.0
 
+# Phase J: bounded live acceptance harness. Read-only defaults; the harness
+# enables execution in-process only and restores it on every exit path.
+live_acceptance:
+  default_mode: direct
+  max_order_quantity: 0.001
+  max_runtime_seconds: 180
+  pipeline_timeout_seconds: 7200
+  flatten_max_attempts: 3
+  require_flat_before_start: true
+  require_paper_endpoint: true
+
 session_closeout:
   enabled: true
   flatten_all_positions: true

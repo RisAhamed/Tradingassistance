@@ -876,6 +876,24 @@ class PaperSafetyConfig(_Section):
     max_notional_exposure: float = 150.0
 
 
+class LiveAcceptanceConfig(_Section):
+    """Bounded live acceptance harness (Phase J). Read-only defaults; the
+    harness enables execution in-process only, never in this file."""
+    default_mode: Literal["direct", "pipeline"] = "direct"
+    max_order_quantity: float = 0.001
+    max_runtime_seconds: float = 180.0
+    pipeline_timeout_seconds: float = 7200.0
+    flatten_max_attempts: int = 3
+    require_flat_before_start: bool = True
+    require_paper_endpoint: bool = True
+
+    @model_validator(mode="after")
+    def _quantity_within_safe_ceiling(self) -> "LiveAcceptanceConfig":
+        if not self.max_order_quantity > 0:
+            raise ValueError("live_acceptance.max_order_quantity must be positive")
+        return self
+
+
 class SentimentConfig(_Section):
     """Observation-only sentiment layer (Phase E).
 
@@ -926,6 +944,7 @@ class AppConfig(_Section):
     testing: TestingConfig = Field(default_factory=TestingConfig)
     recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
     fault_injection: FaultInjectionConfig = Field(default_factory=FaultInjectionConfig)
+    live_acceptance: LiveAcceptanceConfig = Field(default_factory=LiveAcceptanceConfig)
 
     @model_validator(mode="after")
     def _session_ordering(self) -> "AppConfig":
@@ -961,6 +980,15 @@ class AppConfig(_Section):
             raise ValueError(
                 "session.max_holding_minutes, risk.maximum_holding_minutes and "
                 "trade_plan.maximum_holding_minutes must be equal"
+            )
+        # Phase J: the acceptance ceiling can never exceed the paper-safety
+        # cap (when enabled) or the documented 0.01 safe ceiling otherwise.
+        ceiling = (self.paper_safety.max_qty_per_order
+                   if self.paper_safety.enabled else 0.01)
+        if self.live_acceptance.max_order_quantity > ceiling:
+            raise ValueError(
+                "live_acceptance.max_order_quantity exceeds the safe ceiling "
+                f"({ceiling})"
             )
         return self
 
