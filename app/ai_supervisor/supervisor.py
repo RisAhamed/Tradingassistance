@@ -158,6 +158,29 @@ class AISupervisor:
                 messages.append({"role": "tool", "content": json.dumps(output, default=str)})
         return {"kind": kind, "tool_calls_used": used, "summary": final_text}
 
+    async def review_optimization(self) -> dict[str, Any]:
+        """Human-triggered review of the latest tuner proposal (Phase I).
+
+        Passes the proposal to the AI as read-only context via a synthetic
+        investigation event. The AI may write its own pending proposal
+        through its tools; nothing is ever applied automatically.
+        """
+        from app.events.types import make_event
+        from app.optimization.apply import _dirs
+
+        output_dir = _dirs(self.engine)["output"]
+        latest = None
+        if output_dir.exists():
+            paths = sorted(output_dir.glob("*.json"))
+            latest = paths[-1] if paths else None
+        context = {"latest_proposal": latest.name if latest else None}
+        event = make_event(
+            EventType.AI_ACTION_REQUESTED,
+            payload={"action": "review_optimization", **context},
+        )
+        await self.investigate(event, kind="optimization_review")
+        return {"investigated": True, **context}
+
     async def _execute_tool(self, call: dict[str, Any]) -> dict[str, Any]:
         name = call.get("name", "")
         arguments = call.get("arguments") or {}

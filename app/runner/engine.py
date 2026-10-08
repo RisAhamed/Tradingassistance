@@ -3610,7 +3610,28 @@ class TradingEngine:
         # Phase E: observation-only sentiment view (sanitized, secret-free).
         data["sentiment"] = self.sentiment_payload()
         data["strategy_selection"] = self.orchestrator.describe()
+        data["proposals"] = self.proposals_payload()
         return data
+
+    def proposals_payload(self) -> dict:
+        """Phase I: proposal lifecycle counts for payload()/dashboard."""
+        from app.optimization.apply import _dirs
+
+        counts = {"pending": 0, "applied": 0, "rejected": 0}
+        try:
+            dirs = _dirs(self)
+            for state in counts:
+                directory = dirs[state]
+                if directory.exists():
+                    counts[state] = sum(
+                        1 for p in directory.glob("*.json")
+                        if not p.stem.endswith(".applied"))
+        except Exception:  # noqa: BLE001 - observability only
+            pass
+        last = getattr(self, "_last_applied_proposal", None) or {}
+        return {**counts,
+                "last_applied_at": last.get("applied_at"),
+                "last_applied_id": last.get("proposal_id")}
 
     @property
     def running(self) -> bool:

@@ -71,6 +71,8 @@ data/
 logs/
 *.sqlite3
 *.db
+# Phase I: code-owned proposal overlay (written only by the apply routine).
+configs/applied_overrides.yaml
 
 # Tooling / scratch
 .freebuff/

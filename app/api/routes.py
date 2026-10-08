@@ -81,6 +81,44 @@ def create_router() -> APIRouter:
         payload = _runtime(request).engine.payload()
         return {**payload.get("strategy", {}), "strategy_selection": payload.get("strategy_selection")}
 
+    # -- Phase I: proposal lifecycle (human approval surface) ----------------
+    @router.get("/api/proposals")
+    async def proposals_list(request: Request):
+        from app.optimization.apply import list_proposals
+
+        return {"proposals": list_proposals(_runtime(request).engine)}
+
+    @router.get("/api/proposals/{proposal_id}")
+    async def proposal_detail(proposal_id: str, request: Request):
+        from app.optimization.apply import find_proposal
+
+        found = find_proposal(_runtime(request).engine, proposal_id)
+        if found is None:
+            raise HTTPException(status_code=404, detail="proposal not found")
+        proposal, path = found
+        return {"proposal_id": proposal_id, "state": path.parent.name, "proposal": proposal}
+
+    @router.post("/api/proposals/{proposal_id}/reject")
+    async def proposal_reject(proposal_id: str, request: Request, confirm: str | None = None):
+        if confirm != "yes":
+            raise HTTPException(status_code=400, detail="state-changing action requires ?confirm=yes")
+        from app.optimization.apply import reject_proposal
+
+        return await reject_proposal(_runtime(request).engine, proposal_id, actor="human:api")
+
+    @router.post("/api/proposals/{proposal_id}/apply")
+    async def proposal_apply(proposal_id: str, request: Request, confirm: str | None = None):
+        if confirm != "yes":
+            raise HTTPException(status_code=400, detail="state-changing action requires ?confirm=yes")
+        from app.optimization.apply import apply_proposal
+
+        return await apply_proposal(_runtime(request).engine, proposal_id, actor="human:api")
+
+    @router.post("/api/ai/review_optimization")
+    async def ai_review_optimization(request: Request):
+        runtime = _runtime(request)
+        return await runtime.supervisor.review_optimization()
+
     @router.get("/api/risk/status")
     async def risk_status(request: Request):
         payload = _runtime(request).engine.payload()

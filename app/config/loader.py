@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -15,12 +16,28 @@ from app.core.errors import ConfigError, PaperOnlyViolation
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# Phase I: code-owned overlay written ONLY by the proposal apply routine
+# (human-approved or AI-with-permission). Never hand-edit. Absent = no-op.
+APPLIED_OVERRIDES_FILENAME = "applied_overrides.yaml"
+
+logger = logging.getLogger("app.config.loader")
+
 
 def _resolve_path(path: str | os.PathLike[str]) -> Path:
     candidate = Path(path)
     if not candidate.is_absolute():
         candidate = PROJECT_ROOT / candidate
     return candidate
+
+
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge overlay into base (overlay wins). Mutates base."""
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = copy.deepcopy(value)
+    return base
 
 
 def load_config(
@@ -49,6 +66,28 @@ def load_config(
 
     data: dict[str, Any] = copy.deepcopy(raw)
     _apply_env_overrides(data, env)
+
+    overlay_path = _resolve_path(Path("configs") / APPLIED_OVERRIDES_FILENAME)
+    if overlay_path.exists():
+        try:
+            overlay = yaml.safe_load(overlay_path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"invalid YAML in {overlay_path}: {exc}") from exc
+        if not isinstance(overlay, dict):
+            raise ConfigError(f"{overlay_path} must contain a YAML mapping at the top level")
+        _deep_merge(data, overlay)
+        logger.info(
+            "CONFIG OVERLAY=%s",
+            str(overlay_path),
+            extra={"structured": {"event": "CONFIG_OVERLAY", "component": "config",
+                                  "path": str(overlay_path)}},
+        )
+    else:
+        logger.info(
+            "CONFIG OVERLAY=none",
+            extra={"structured": {"event": "CONFIG_OVERLAY", "component": "config",
+                                  "path": "none"}},
+        )
 
     try:
         config = AppConfig.model_validate(data)

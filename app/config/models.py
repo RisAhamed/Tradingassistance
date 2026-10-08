@@ -494,6 +494,15 @@ class RiskConfig(_Section):
     stale_market_data: StaleDataConfig = Field(default_factory=StaleDataConfig)
     maximum_spread_percent: float = 0.10
 
+    @field_validator("risk_per_trade_percent")
+    @classmethod
+    def _risk_percent_in_range(cls, value: float) -> float:
+        # Phase I: proposal validation relies on the schema rejecting
+        # nonsense (e.g. negative risk). Fail closed at load time.
+        if not 0.0 < value <= 100.0:
+            raise ValueError("risk.risk_per_trade_percent must be within (0, 100]")
+        return value
+
 
 class PositionSizingConfidenceConfig(_Section):
     """Conviction sizing (Phase G): scales the risk budget from a ceiling.
@@ -633,6 +642,10 @@ class OptimizationConfig(_Section):
     enabled: bool = False
     spaces_dir: str = "app/optimization/spaces"
     output_dir: str = "logs/proposals"
+    # Phase I: proposal lifecycle directories (all repo-local, gitignored).
+    pending_dir: str = "logs/proposals/pending"
+    applied_dir: str = "logs/proposals/applied"
+    rejected_dir: str = "logs/proposals/rejected"
     window: OptimizationWindowConfig = Field(default_factory=OptimizationWindowConfig)
     scoring: OptimizationScoringConfig = Field(default_factory=OptimizationScoringConfig)
 
@@ -669,6 +682,11 @@ class AiPermissionsConfig(_Section):
     allow_resume: bool = True
     allow_reconciliation: bool = True
     allow_flatten: bool = False
+    # Phase I: proposal lifecycle. Neither flag can enable trading — they only
+    # gate writing human-reviewable proposal JSON (propose) and applying an
+    # approved proposal through the shared human routine (apply, default off).
+    allow_propose_strategy_changes: bool = True
+    allow_apply_proposal: bool = False
 
 
 class AiLimitsConfig(_Section):

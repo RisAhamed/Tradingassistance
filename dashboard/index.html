@@ -79,6 +79,7 @@
     <section><h2>TradePlan</h2><pre id="tradeplan">loading…</pre></section>
     <section><h2>TradePlan Lifecycle</h2><pre id="tradeplan-lifecycle">loading…</pre></section>
     <section><h2>Recovery</h2><pre id="recovery">loading…</pre></section>
+    <section><h2>Proposals (human approval required)</h2><div id="proposals">loading…</div><div id="prop-msg"></div></section>
     <section><h2>Logging</h2><pre id="logging">loading…</pre></section>
     <section><h2>Decision Trace</h2><pre id="decision-trace">loading…</pre></section>
     <!-- Phase E: observation-only sentiment (never gates trading) -->
@@ -142,10 +143,41 @@
         // Phase E: observation-only sentiment card (score, gauge, microstructure, age, stale flag).
         show("sentiment", sentiment || "sentiment disabled");
         $("session").textContent = "session: " + (((session || {}).session || {}).state || "…");
+        await propRefresh();
       } catch (err) { $("health").textContent = "health: api unavailable (" + err.message + ")"; }
     }
-    async function expRefresh() {
+    // Phase I: proposal approval surface (read-only listing; Apply/Reject
+    // require explicit confirmation and hit ?confirm=yes endpoints).
+    async function propRefresh() {
       try {
+        const data = await get("/api/proposals");
+        const list = (data && data.proposals) || [];
+        const box = $("proposals");
+        box.innerHTML = "";
+        if (!list.length) { box.textContent = "no proposals"; return; }
+        for (const p of list) {
+          const row = document.createElement("div");
+          const label = document.createElement("span");
+          label.textContent = p.proposal_id + " [" + p.state + "] " + (p.origin || "") + " " + (p.summary || "") + " ";
+          row.appendChild(label);
+          if (p.state === "pending") {
+            for (const action of ["apply", "reject"]) {
+              const btn = document.createElement("button");
+              btn.textContent = action;
+              btn.onclick = async () => {
+                if (!confirm(action + " proposal " + p.proposal_id + "? Restart required after apply.")) return;
+                const res = await fetch("/api/proposals/" + p.proposal_id + "/" + action + "?confirm=yes", { method: "POST" });
+                $("prop-msg").textContent = action + ": " + res.status + " " + (await res.text()).slice(0, 300);
+                await propRefresh(); await refresh();
+              };
+              row.appendChild(btn);
+            }
+          }
+          box.appendChild(row);
+        }
+      } catch (err) { $("proposals").textContent = "proposals unavailable"; }
+    }
+    async function expRefresh() {      try {
         const exp = await get("/api/experiment/status");
         $("exp-state").textContent = "experiment: " + exp.state + (exp.execution_enabled ? " (EXECUTION ON)" : " (execution off)");
         $("exp-state").className = "banner " + (exp.state === "running" || exp.state === "armed" ? "warn" : exp.state === "halted" || exp.state === "failed" ? "err" : "");

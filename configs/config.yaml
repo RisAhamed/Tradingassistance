@@ -296,6 +296,10 @@ optimization:
   enabled: false
   spaces_dir: app/optimization/spaces
   output_dir: logs/proposals
+  # Phase I: proposal lifecycle dirs (repo-local, gitignored via logs/).
+  pending_dir: logs/proposals/pending
+  applied_dir: logs/proposals/applied
+  rejected_dir: logs/proposals/rejected
   window:
     train_bars: 2000
     validation_bars: 500
@@ -330,6 +334,11 @@ ai:
     allow_resume: true
     allow_reconciliation: true
     allow_flatten: false
+    # Phase I: NEITHER flag can enable trading. propose writes a PENDING
+    # proposal JSON for human review; apply (default off) routes through the
+    # same shared routine as the human endpoint and requires a restart.
+    allow_propose_strategy_changes: true
+    allow_apply_proposal: false
   limits:
     maximum_tool_calls_per_event: 5
     timeout_seconds: 30

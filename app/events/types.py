@@ -91,6 +91,12 @@ class EventType(str, Enum):
     AI_INVESTIGATION_STARTED = "AIInvestigationStarted"
     AI_INVESTIGATION_COMPLETED = "AIInvestigationCompleted"
     AI_ACTION_REQUESTED = "AIActionRequested"
+    # Phase I: proposal lifecycle (tuner + AI-authored, human-approved).
+    PROPOSAL_CREATED = "ProposalCreated"
+    PROPOSAL_REJECTED = "ProposalRejected"
+    PROPOSAL_APPLIED = "ProposalApplied"
+    AI_PROPOSAL_CREATED = "AIProposalCreated"
+    AI_PROPOSAL_APPLICATION_REFUSED = "AIProposalApplicationRefused"
     AI_ACTION_REJECTED = "AIActionRejected"
     AI_TOOL_CALLED = "AIToolCalled"
     AI_UNAVAILABLE = "AIUnavailable"
