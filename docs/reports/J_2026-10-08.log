@@ -5,7 +5,7 @@
 RECONCILIATION MISMATCH
 
 ===== full suite =====
-607 passed, 2 warnings in 155.41s (rerun post-commit scope, same tree)
+607 passed, 2 warnings in 163.99s (final full-suite rerun on the committed tree)
 
 ===== dry-run stdout (real Alpaca paper) =====
 in-process execution enabled = TRUE (temporary)
