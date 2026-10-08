@@ -3,3 +3,24 @@
 
 ===== dry-run =====
 RECONCILIATION MISMATCH
+
+===== full suite =====
+607 passed, 2 warnings in 155.41s (rerun post-commit scope, same tree)
+
+===== dry-run stdout (real Alpaca paper) =====
+in-process execution enabled = TRUE (temporary)
+max order quantity = 0.001
+mode=direct quantity(requested)=0.001 timeout=180.0s
+preflight trading_mode_paper: PASS ù mode=paper
+preflight env_alpaca_paper: PASS ù alpaca_paper=True
+preflight not_live_endpoint: PASS ù paper endpoint
+preflight has_credentials: PASS ù credentials present
+preflight repository_execution_disabled: PASS ù execution.enabled=False
+preflight repository_paper_safety_disabled: PASS ù paper_safety.enabled=False
+preflight broker_is_paper: PASS ù broker=alpaca paper=True
+preflight broker_reachable: PASS ù equity=999834.88
+preflight broker_position_flat: PASS ù positions=[]
+preflight local_position_flat: PASS ù flat=True
+preflight local_oms_empty: PASS ù orders=0
+dry-run plan: preflight only, no order submitted
+repository execution.enabled=False (unchanged)
