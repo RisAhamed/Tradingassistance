@@ -30,6 +30,10 @@ def _parse_args(argv=None):
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--report", type=str, default=None)
     parser.add_argument("--timeout", type=float, default=None)
+    parser.add_argument("--poll-window", type=float, default=None,
+                        help="synchronous terminal-status wait (default: live_acceptance.poll_window_seconds)")
+    parser.add_argument("--poll-interval", type=float, default=None,
+                        help="poll cadence during the wait (default: live_acceptance.poll_interval_seconds)")
     return parser.parse_args(argv)
 
 
@@ -45,6 +49,11 @@ def main(argv=None) -> int:
     timeout = args.timeout if args.timeout is not None else (
         config.live_acceptance.pipeline_timeout_seconds if mode == "pipeline"
         else config.live_acceptance.max_runtime_seconds)
+    # J.1: in-process CLI overrides for the poll window (yaml untouched).
+    if args.poll_window is not None:
+        config.live_acceptance.poll_window_seconds = args.poll_window
+    if args.poll_interval is not None:
+        config.live_acceptance.poll_interval_seconds = args.poll_interval
 
     print(banner_top(config))
     print(f"mode={mode} quantity(requested)={quantity} timeout={timeout}s")

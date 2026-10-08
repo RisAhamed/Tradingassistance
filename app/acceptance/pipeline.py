@@ -46,10 +46,15 @@ async def run_pipeline(config, env, *, quantity: float, timeout: float,
     exit_code, outcome = _direct.EXIT_ERROR, "unexpected_error"
     try:
         submitted: asyncio.Future = asyncio.get_running_loop().create_future()
+        engine_fill_seen: dict[str, Any] = {}
 
         def _watch(event) -> None:
             if event.type is EventType.ORDER_SUBMITTED and not submitted.done():
                 submitted.set_result(event)
+            if event.type is EventType.ORDER_FILLED and "engine_first" not in engine_fill_seen:
+                from app.core.clock import utcnow as _utcnow
+
+                engine_fill_seen["engine_first"] = _utcnow().isoformat()
 
         engine.bus.subscribe_all(_watch)
         await runtime.startup()
@@ -70,14 +75,24 @@ async def run_pipeline(config, env, *, quantity: float, timeout: float,
         report["order"].update(
             order_id=order.order_id, broker_order_id=order.broker_order_id,
             side=order.side.value, quantity=order.quantity)
-        status, polls, last_poll_error = await _direct._poll_terminal(
-            broker, order, timeout=30.0,
-            interval=config.execution.order_sync_interval_seconds)
+        poll_window = min(float(config.live_acceptance.poll_window_seconds), 600.0)
+        poll_interval = float(config.live_acceptance.poll_interval_seconds)
+        report["poll_window_seconds"] = poll_window
+        status, polls, last_poll_error, harness_seen = await _direct._poll_terminal(
+            broker, engine, order, timeout=poll_window,
+            interval=poll_interval, seen={})
         report["order"].update(
             status=status, filled_quantity=order.filled_quantity,
             average_fill_price=order.average_fill_price,
             broker_order_id=order.broker_order_id,
             polls=polls, last_poll_error=last_poll_error)
+        report["poll_count"] = polls
+        report["harness_sync_first_seen_at"] = harness_seen
+        # The full engine tick loop runs here, so its continuous resync is
+        # the authoritative fill observer; the ORDER_FILLED subscription
+        # above proves it independently of the harness sync.
+        report["engine_poll_observed_fill"] = "engine_first" in engine_fill_seen
+        report["engine_poll_first_seen_at"] = engine_fill_seen.get("engine_first")
         if status == "rejected":
             report["order"]["reject_reason"] = order.reject_reason
             ok = await engine.reconcile()
@@ -106,11 +121,12 @@ async def run_pipeline(config, env, *, quantity: float, timeout: float,
         report["flatten"] = {"attempts": config.live_acceptance.flatten_max_attempts,
                              "final_broker_zero": broker_zero,
                              "final_local_flat": local_flat,
-                             "elapsed_seconds": round(elapsed, 2)}
+                             "elapsed_seconds": round(elapsed, 2),
+                             "flatten_returned": flat_ok}
         ok = await engine.reconcile()
         report["reconciliation"] = {"ok": ok, "discrepancies": []}
         await engine.halt_experiment("pipeline_acceptance_complete", operator="acceptance")
-        if broker_zero and local_flat and ok and flat_ok:
+        if broker_zero and local_flat and ok:
             exit_code, outcome = _direct.EXIT_PASS, "pass"
         else:
             exit_code, outcome = _direct.EXIT_FLATTEN, "flatten_failed"

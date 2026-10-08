@@ -886,6 +886,18 @@ class LiveAcceptanceConfig(_Section):
     flatten_max_attempts: int = 3
     require_flat_before_start: bool = True
     require_paper_endpoint: bool = True
+    # J.1: synchronous terminal-status wait, tuned from measured paper fill
+    # latency. Engine's continuous 1s resync poll is unchanged and separate.
+    poll_window_seconds: float = 60.0
+    poll_interval_seconds: float = 1.0
+
+    @model_validator(mode="after")
+    def _poll_window_bounds(self) -> "LiveAcceptanceConfig":
+        if not 30.0 <= self.poll_window_seconds <= 3600.0:
+            raise ValueError("live_acceptance.poll_window_seconds must be within [30, 3600]")
+        if not 0.0 < self.poll_interval_seconds <= 60.0:
+            raise ValueError("live_acceptance.poll_interval_seconds must be within (0, 60]")
+        return self
 
     @model_validator(mode="after")
     def _quantity_within_safe_ceiling(self) -> "LiveAcceptanceConfig":

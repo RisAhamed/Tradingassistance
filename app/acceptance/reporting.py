@@ -11,8 +11,9 @@ from typing import Any
 from app.config.loader import PROJECT_ROOT
 
 OUTCOMES = (
-    "pass", "preflight_failed", "order_rejected", "ambiguous_submission",
-    "flatten_failed", "unexpected_error", "no_signal_within_timeout",
+    "pass", "pass_deferred_fill", "preflight_failed", "order_rejected",
+    "ambiguous_submission", "flatten_failed", "unexpected_error",
+    "no_signal_within_timeout",
 )
 
 
@@ -42,6 +43,14 @@ def new_report(mode: str) -> dict[str, Any]:
         "exit_code": 6,
         "outcome": "unexpected_error",
         "error": None,
+        # J.1: engine-vs-harness fill observation proof.
+        "engine_poll_observed_fill": False,
+        "engine_poll_first_seen_at": None,
+        "harness_sync_first_seen_at": None,
+        "fill_latency_seconds": None,
+        "poll_window_seconds": 0,
+        "poll_count": 0,
+        "poll_error_count": 0,
     }
 
 

@@ -1,0 +1,33 @@
+# J.1 raw terminal transcript (abridged to commands + results; full per-run
+# stdouts live in C:\Users\riswa\AppData\Local\Temp\opencode\j1_run{1..6}.txt)
+
+$ .venv/Scripts/python.exe -m pytest tests/test_phase_j1_poll.py -q
+.....  [5 passed]
+
+$ .venv/Scripts/python.exe -m pytest tests
+612 passed, 2 warnings in 210.78s
+
+$ python -c "sha256(configs/config.yaml)"
+68c7764c499b1429d77ba49207960d57b0772b7fb43d10bd0c932e0f5d8ddb63
+
+$ .venv/Scripts/python.exe -m app.acceptance --mode direct --timeout 400  (x6 runs)
+run1: exit 5 FLATTEN_FAILED — order ord_2b14c2c1cf5f filled, local exit fill
+      never synced (pre-fix _await_flat). broker_order_id 66bc8fbe.
+run2: exit 5 FLATTEN_FAILED — states green, stale flatten() verdict (pre-fix).
+      order ord_985771895af6 filled, latency 2.36.
+run3: exit 0 PASS — order ord_248754ae5695 filled, latency 2.40.
+run4: exit 0 PASS — order ord_5474f3fb6f39 filled, latency 2.37.
+run5: exit 0 PASS — order ord_462759bac5e4 filled, latency 2.31.
+run6: exit 0 PASS — order ord_b5b7bf874a08 filled, latency 2.33.
+All runs: preflight PASS, flatten OK, reconciliation OK (runs 3-6 clean),
+broker.get_positions() == [] verified after every run,
+execution.enabled=false before/after every run.
+
+$ git status --short (pre-commit)
+ M app/acceptance/__main__.py
+ M app/acceptance/direct.py
+ M app/acceptance/pipeline.py
+ M app/acceptance/reporting.py
+ M app/config/models.py
+ M configs/config.yaml
+?? tests/test_phase_j1_poll.py

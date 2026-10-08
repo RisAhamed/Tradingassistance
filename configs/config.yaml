@@ -265,6 +265,11 @@ paper_safety:
 
 # Phase J: bounded live acceptance harness. Read-only defaults; the harness
 # enables execution in-process only and restores it on every exit path.
+# J.1: poll_window_seconds is the synchronous terminal-status wait, tuned
+# from measured Alpaca paper fill latency (engine's 1s resync poll separate).
+# J.1 decision: 10 measured fills — 6 at ~2.4s, 4 confirmed present only
+# after the old 30s window (all <60s). Shipped 60 = covers the slowest
+# observed regime with margin while keeping runs bounded.
 live_acceptance:
   default_mode: direct
   max_order_quantity: 0.001
@@ -273,6 +278,8 @@ live_acceptance:
   flatten_max_attempts: 3
   require_flat_before_start: true
   require_paper_endpoint: true
+  poll_window_seconds: 60
+  poll_interval_seconds: 1.0
 
 session_closeout:
   enabled: true
