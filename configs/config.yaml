@@ -290,6 +290,23 @@ backtesting:
     entry_price: close
     exit_price: stop_target
 
+# Phase H: offline walk-forward optimizer. CLI-only, default off; the tuner
+# never touches live trading or this file. Weights must sum to 1.0.
+optimization:
+  enabled: false
+  spaces_dir: app/optimization/spaces
+  output_dir: logs/proposals
+  window:
+    train_bars: 2000
+    validation_bars: 500
+    step_bars: 500
+  scoring:
+    net_pnl: 0.35
+    profit_factor: 0.25
+    max_drawdown: 0.20
+    expectancy: 0.10
+    stability: 0.10
+
 ai:
   enabled: true
   provider: ollama

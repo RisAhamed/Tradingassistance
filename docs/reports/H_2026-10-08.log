@@ -1,0 +1,43 @@
+........................................................................ [ 12%]
+........................................................................ [ 24%]
+........................................................................ [ 37%]
+........................................................................ [ 49%]
+........................................................................ [ 62%]
+........................................................................ [ 74%]
+........................................................................ [ 86%]
+........................................................................ [ 99%]
+....                                                                     [100%]
+============================== warnings summary ===============================
+.venv\Lib\site-packages\fastapi\testclient.py:1
+  C:\Users\riswa\Desktop\tradebot\tradebot\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/test_phase_d2_paper.py::test_paper_mode_with_alpaca_broker_constructs_paper_only_client
+  C:\Users\riswa\Desktop\tradebot\tradebot\.venv\Lib\site-packages\websockets\legacy\__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+580 passed, 2 warnings in 96.13s (0:01:36)
+
+===== tuner run 1 =====
+source=synthetic(length=3000, reference_start=2024-01-01T00:00:00Z) folds_config={'train_bars': 2000, 'validation_bars': 500, 'step_bars': 500}
+rank score     params
+1    2.6595    lookback_periods=10, buffer_percent=0.1, rsi_min_long=50, rsi_max_long=80
+2    2.6595    lookback_periods=10, buffer_percent=0.1, rsi_min_long=55, rsi_max_long=80
+3    2.6595    lookback_periods=10, buffer_percent=0.1, rsi_min_long=60, rsi_max_long=80
+4    2.6595    lookback_periods=20, buffer_percent=0.1, rsi_min_long=50, rsi_max_long=80
+5    2.6595    lookback_periods=20, buffer_percent=0.1, rsi_min_long=55, rsi_max_long=80
+baseline score=2.3927 params={'strategy.breakout.lookback_periods': 20, 'strategy.breakout.buffer_percent': 0.05, 'strategy.momentum.rsi_min_long': 55.0, 'strategy.momentum.rsi_max_long': 75.0}
+recommended: top walk-forward score 2.6595 vs baseline 2.3927 (beats current config)
+proposal: C:\Users\riswa\Desktop\tradebot\tradebot\logs\proposals\2026-10-08T073027Z.json
+===== tuner run 2 =====
+source=synthetic(length=3000, reference_start=2024-01-01T00:00:00Z) folds_config={'train_bars': 2000, 'validation_bars': 500, 'step_bars': 500}
+rank score     params
+1    2.6595    lookback_periods=10, buffer_percent=0.1, rsi_min_long=50, rsi_max_long=80
+2    2.6595    lookback_periods=10, buffer_percent=0.1, rsi_min_long=55, rsi_max_long=80
+3    2.6595    lookback_periods=10, buffer_percent=0.1, rsi_min_long=60, rsi_max_long=80
+4    2.6595    lookback_periods=20, buffer_percent=0.1, rsi_min_long=50, rsi_max_long=80
+5    2.6595    lookback_periods=20, buffer_percent=0.1, rsi_min_long=55, rsi_max_long=80
+baseline score=2.3927 params={'strategy.breakout.lookback_periods': 20, 'strategy.breakout.buffer_percent': 0.05, 'strategy.momentum.rsi_min_long': 55.0, 'strategy.momentum.rsi_max_long': 75.0}
+recommended: top walk-forward score 2.6595 vs baseline 2.3927 (beats current config)
+proposal: C:\Users\riswa\Desktop\tradebot\tradebot\logs\proposals\2026-10-08T074425Z.json

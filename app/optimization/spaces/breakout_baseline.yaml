@@ -1,0 +1,11 @@
+# Breakout baseline search space (Phase H).
+#
+# Every swept leaf MUST be a dotted path into AppConfig; every candidate
+# value is explicit here — no implicit search. The current yaml values are
+# always included so the tuner can report "the current config is best".
+name: breakout_baseline
+parameters:
+  strategy.breakout.lookback_periods: [10, 20, 30]
+  strategy.breakout.buffer_percent: [0.02, 0.05, 0.10]
+  strategy.momentum.rsi_min_long: [50, 55, 60]
+  strategy.momentum.rsi_max_long: [70, 75, 80]

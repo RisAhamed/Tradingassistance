@@ -597,6 +597,45 @@ class BacktestingConfig(_Section):
     # keeps the legacy utcnow-anchored (non-reproducible) behaviour.
     reference_start: str | None = None
 
+
+class OptimizationWindowConfig(_Section):
+    """Walk-forward geometry (Phase H). Fold i trains on
+    ``data[i*step : i*step+train]`` and validates on the next
+    ``validation`` bars; a fold is kept only when both slices are complete.
+    """
+    train_bars: int = 2000
+    validation_bars: int = 500
+    step_bars: int = 500
+
+
+class OptimizationScoringConfig(_Section):
+    """Walk-forward scoring weights (Phase H). Must sum to 1.0."""
+    net_pnl: float = 0.35
+    profit_factor: float = 0.25
+    max_drawdown: float = 0.20
+    expectancy: float = 0.10
+    stability: float = 0.10
+
+    @model_validator(mode="after")
+    def _weights_sum_to_one(self) -> "OptimizationScoringConfig":
+        total = (self.net_pnl + self.profit_factor + self.max_drawdown
+                 + self.expectancy + self.stability)
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError(
+                f"optimization.scoring weights must sum to 1.0 (±1e-9), got {total}"
+            )
+        return self
+
+
+class OptimizationConfig(_Section):
+    """Offline walk-forward tuner (Phase H). CLI-only, default off, never
+    touches live trading or configs/config.yaml."""
+    enabled: bool = False
+    spaces_dir: str = "app/optimization/spaces"
+    output_dir: str = "logs/proposals"
+    window: OptimizationWindowConfig = Field(default_factory=OptimizationWindowConfig)
+    scoring: OptimizationScoringConfig = Field(default_factory=OptimizationScoringConfig)
+
 class AiModelConfig(_Section):
     name: str = ""
     temperature: float = 0.1
@@ -857,6 +896,7 @@ class AppConfig(_Section):
     paper_safety: PaperSafetyConfig = Field(default_factory=PaperSafetyConfig)
     session_closeout: SessionCloseoutConfig = Field(default_factory=SessionCloseoutConfig)
     backtesting: BacktestingConfig = Field(default_factory=BacktestingConfig)
+    optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
     ai: AiConfig = Field(default_factory=AiConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
