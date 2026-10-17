@@ -12,7 +12,14 @@ from app.runtime import build_runtime
 
 
 def _config():
-    return load_config(env=get_env())
+    config = load_config(env=get_env())
+    config.market_data.provider = "mock"
+    config.trading.broker = "mock"
+    config.ai.enabled = False
+    config.storage.enabled = False
+    config.logging.console.enabled = False
+    config.logging.file.enabled = False
+    return config
 
 
 def _runtime():

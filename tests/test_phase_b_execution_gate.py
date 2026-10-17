@@ -39,6 +39,7 @@ def _engine(*, execution_enabled: bool):
 
 def test_execution_disabled_does_not_construct_alpaca_trading_client(monkeypatch):
     config = load_config(env=get_env())
+    config.market_data.provider = "mock"
     config.execution.enabled = False
     config.trading.broker = "alpaca"
 
