@@ -337,7 +337,7 @@ ai:
     temperature: 0.1
     max_tokens: 2000
   endpoint:
-    base_url:https://ollama.com/api/chat 
+    base_url: https://ollama.com
   behavior:
     run_on_every_tick: false
     run_on_events_only: true
