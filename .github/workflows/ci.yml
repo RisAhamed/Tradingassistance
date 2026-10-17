@@ -1,0 +1,72 @@
+# =============================================================================
+# CI — test pipeline
+#
+# WHAT THIS WORKFLOW DOES
+#   Runs the pytest suite on every push (any branch), every pull request
+#   (any branch), and on manual dispatch from the GitHub Actions tab.
+#   It installs the runtime requirements plus a few test-only tools
+#   (pytest, pytest-asyncio, pytest-timeout) and executes `pytest tests`.
+#   If the run fails, it uploads the pytest cache and logs as artifacts
+#   so the failure can be inspected after the fact.
+#
+# WHAT THIS WORKFLOW DOES NOT DO
+#   - It does NOT start the trading engine or any long-running service.
+#   - It does NOT touch a broker, place orders, or connect to Alpaca.
+#   - It does NOT need any credentials, environment variables, or secrets
+#     (the test suite uses mocks for broker, market data, and AI provider).
+#   - It does NOT modify configs/config.yaml, .env, or any runtime config.
+#
+# The suite is credential-free and offline by design. If a test ever tries
+# to reach the network, that is a test bug — not a reason to add credentials.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Upgrade pip
+        run: pip install --upgrade pip
+
+      - name: Install runtime requirements
+        run: pip install -r requirements.txt
+
+      - name: Install test-only dependencies
+        run: pip install pytest pytest-asyncio pytest-timeout
+
+      - name: Run test suite
+        run: python -m pytest tests -q --timeout=600
+
+      - name: Upload pytest diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-logs-${{ matrix.python-version }}
+          path: |
+            .pytest_cache/
+            logs/
+          retention-days: 7
