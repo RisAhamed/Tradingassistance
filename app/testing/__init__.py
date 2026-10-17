@@ -165,10 +165,13 @@ class SoakCollector:
             for event_type in FORBIDDEN_WHILE_DISABLED:
                 if self.get(event_type):
                     failures.append(f"FORBIDDEN event while execution disabled: {event_type.value}")
-        if engine.oms.all_orders():
-            failures.append("orders exist while execution is disabled")
-        if not engine.position_manager.is_flat:
-            failures.append("position is not flat while execution is disabled")
+            # These invariants only hold when execution is intentionally disabled;
+            # with execution enabled the run is expected to create orders and may
+            # legitimately hold a position, so they must not be reported as failures.
+            if engine.oms.all_orders():
+                failures.append("orders exist while execution is disabled")
+            if not engine.position_manager.is_flat:
+                failures.append("position is not flat while execution is disabled")
 
         live_candles = self.live_candles(engine)
         if self._live_baseline is not None:

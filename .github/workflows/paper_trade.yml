@@ -1,0 +1,96 @@
+# =============================================================================
+# PAPER TRADE — standardized live paper-trading run (manual trigger only)
+#
+# WHAT THIS WORKFLOW DOES
+#   Starts the STANDARD application entry point (`python -m app`) against the
+#   Alpaca PAPER endpoint. There is exactly ONE source of truth for behaviour:
+#   the checked-in configuration file. This workflow injects secrets only; it
+#   never edits or overrides application configuration. If execution is enabled
+#   there the engine trades; if it is disabled the engine is read-only.
+#
+# GRACEFUL SHUTDOWN
+#   When the shell `timeout` fires (or the job is cancelled), a SIGTERM is sent
+#   to `python -m app`. uvicorn catches it and runs the FastAPI lifespan
+#   shutdown, which calls `runtime.shutdown()` -> `engine.stop()`. When live and
+#   holding a position, `engine.stop()` FLATTENS the position BEFORE the broker
+#   is disconnected, so a stopped run never leaves an unprotected position open.
+#
+# SAFETY
+#   - Manual trigger only (`workflow_dispatch`).
+#   - Secrets are referenced only as `${{ secrets.* }}`; never hardcoded.
+#   - `timeout-minutes: 360` bounds the job below GitHub's 6-hour maximum.
+# =============================================================================
+
+name: Paper Trade
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: paper-trade-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  paper_trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Upgrade pip
+        run: pip install --upgrade pip
+
+      - name: Install runtime requirements
+        run: pip install -r requirements.txt
+
+      - name: Verify credentials are present
+        run: |
+          if [ -z "${{ secrets.ALPACA_API_KEY }}" ]; then
+            echo "ERROR: ALPACA_API_KEY secret is missing."
+            exit 1
+          fi
+          echo "Credentials verified."
+
+      - name: Run the standard app (python -m app)
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          ALPACA_PAPER: ${{ secrets.ALPACA_PAPER }}
+          APCA_API_BASE_URL: ${{ secrets.APCA_API_BASE_URL }}
+          OLLAMA_BASE_URL: ${{ secrets.OLLAMA_BASE_URL }}
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          OLLAMA_MODEL: ${{ secrets.OLLAMA_MODEL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL_NAME: ${{ secrets.GROQ_MODEL_NAME }}
+        run: |
+          # Run for ~5h50m. The shell sends SIGTERM first; uvicorn then runs the
+          # lifespan shutdown -> runtime.shutdown() -> engine.stop(), which
+          # flattens any open position before disconnecting the broker.
+          set +e
+          timeout --signal=TERM --kill-after=120 21000 python -m app
+          rc=$?
+          # 0 = clean exit, 124 = timeout fired, 143 = 128+SIGTERM: all expected.
+          if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ]; then
+            echo "App stopped (rc=$rc) — graceful shutdown expected."
+            exit 0
+          fi
+          echo "Unexpected exit code: $rc"
+          exit "$rc"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-trade-logs
+          path: |
+            logs/
+            logs/reports/
+          retention-days: 7

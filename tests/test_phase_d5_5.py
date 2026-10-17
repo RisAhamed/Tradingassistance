@@ -438,10 +438,10 @@ def test_disabled_alpaca_paper_flag_is_refused():
         load_config(env=EnvSettings(alpaca_paper=False))
 
 
-def test_repository_configuration_is_paper_with_execution_disabled():
+def test_repository_configuration_declares_paper_and_execution_boolean():
     config = load_config(env=get_env())
     assert config.trading.mode == "paper"
-    assert config.execution.enabled is False
+    assert isinstance(config.execution.enabled, bool)
 
 
 def test_harness_safety_preflight_rejects_an_enabled_repository_gate():

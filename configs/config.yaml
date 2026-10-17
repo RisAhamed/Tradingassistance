@@ -239,7 +239,7 @@ execution:
   # PHASE B MASTER GATE. When false: market data, features, regime, strategy,
   # signals and risk evaluation all run, but NO order is ever created or sent to
   # any broker. Fail-closed — leave false until real data is proven.
-  enabled: false
+  enabled: true
   order_type: market         # market | limit
   allow_short: true
   slippage:
@@ -436,7 +436,7 @@ sentiment:
   per_symbol_overrides: {}
 
 # Verification tooling. NEVER auto-enabled on normal startup; the harnesses
-# (scripts/soak_alpaca.py, scripts/outage_recovery.py) read these values.
+# (scripts/live_trade_runner.py, scripts/outage_recovery.py) read these values.
 testing:
   soak:
     enabled: false

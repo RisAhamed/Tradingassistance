@@ -25,6 +25,7 @@ def _engine_config(**overrides):
     config.trading.broker = "mock"
     config.ai.enabled = False
     config.storage.enabled = False
+    config.execution.enabled = False  # sentiment tests are execution-agnostic
     config.sentiment.enabled = True
     config.sentiment.provider = "mock"
     config.sentiment.refresh_interval_seconds = 300.0

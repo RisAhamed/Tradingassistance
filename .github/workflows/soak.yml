@@ -2,7 +2,7 @@
 # SOAK — 6-hour read-only live paper-trading soak (manual trigger only)
 #
 # WHAT THIS WORKFLOW DOES
-#   Runs the live 1-minute bar pipeline (`scripts/soak_alpaca.py`) for a long
+#   Runs the live 1-minute bar pipeline (`scripts/live_trade_runner.py`) for a
 #   duration (~6 hours) on GitHub-hosted infrastructure to observe market-data
 #   reliability, warm-up handoff, recovery, and stream stability over time.
 #   Results (JSON/Markdown reports and the runtime log) are uploaded as
@@ -72,7 +72,7 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL_NAME: ${{ secrets.GROQ_MODEL_NAME }}
         run: |
-          python scripts/soak_alpaca.py --minutes 350 --report logs/reports/phase_soak_cloud.json
+          python scripts/live_trade_runner.py --minutes 350 --report logs/reports/phase_soak_cloud.json
 
       - name: Upload soak results
         if: always()

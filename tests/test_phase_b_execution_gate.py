@@ -62,11 +62,14 @@ async def _pump(engine, limit: int = 700) -> None:
     await asyncio.sleep(0.05)
 
 
-def test_execution_is_disabled_by_default():
-    """Fail-closed: the shipped configuration must not allow orders."""
+def test_repository_config_declares_execution_as_an_explicit_boolean():
+    """Single source of truth: the shipped configuration must parse and declare
+    ``execution.enabled`` as an explicit boolean (no hidden/omitted default).
+    The gate still blocks orders whenever that value is False — proven by the
+    tests below, which pin the flag in memory."""
     config = load_config(env=get_env())
-    assert config.execution.enabled is False
-    assert ExecutionConfig().enabled is False  # also the model default
+    assert isinstance(config.execution.enabled, bool)
+    assert ExecutionConfig().enabled is False  # model default stays fail-closed
 
 
 async def test_execution_disabled_never_creates_an_order():

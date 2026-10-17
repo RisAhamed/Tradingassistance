@@ -1,9 +1,12 @@
-"""Long-duration live 1-minute bar soak test (Phase C1 reliability).
+"""Long-duration live trading / observation runner (Phase C1 reliability).
 
-Read-only: execution stays disabled and the Alpaca trading client is never built.
+Runs the STANDARD engine built from ``configs/config.yaml`` — the single source
+of truth. This script applies NO overrides: if ``execution.enabled`` is true the
+engine trades on the Alpaca paper account; if it is false the run is read-only.
+Order flow is therefore identical to ``python -m app``.
 
 Usage:
-    .venv/Scripts/python.exe scripts/soak_alpaca.py --minutes 10
+    .venv/Scripts/python.exe scripts/live_trade_runner.py --minutes 10
 """
 from __future__ import annotations
 
@@ -38,14 +41,10 @@ MEASURED = (
 
 async def run(minutes: float | None, seconds: float | None, report_path: str | None) -> int:
     env = get_env()
+    # SINGLE SOURCE OF TRUTH: configs/config.yaml. No overrides here — the run
+    # mode (read-only vs live paper trading) is controlled solely by
+    # execution.enabled in the config file, exactly like ``python -m app``.
     config = load_config(env=env)
-    config.market_data.provider = "alpaca"
-    config.trading.broker = "mock"           # never construct a trading client
-    config.execution.enabled = False         # EXECUTION OFF
-    config.ai.enabled = False
-    config.ai.permissions.allow_flatten = False
-    config.market_data.history.provider = "alpaca"
-    config.market_data.history.required = True
     soak = config.testing.soak
     duration_seconds = seconds if seconds is not None else (
         minutes * 60.0 if minutes is not None else soak.duration_minutes * 60.0
@@ -54,14 +53,14 @@ async def run(minutes: float | None, seconds: float | None, report_path: str | N
 
     runtime = build_runtime(config, env)
     engine = runtime.engine
-    assert engine.execution_enabled is False, "EXECUTION GATE MUST BE CLOSED"
+    assert engine.execution_enabled is bool(config.execution.enabled), "engine must mirror config"
 
     collector = SoakCollector()
     collector.attach(runtime.bus)
     extra: Counter = Counter()
     engine.bus.subscribe_all(lambda event: extra.update([event.type.value]))
 
-    print("\n=== PHASE C1 SOAK (execution DISABLED, read-only) ===")
+    print("\n=== LIVE TRADE RUNNER (config-driven; see execution.enabled) ===")
     log_path = PROJECT_ROOT / config.logging.file.path
     print(f"symbol={config.trading.symbol} seconds={duration_seconds} bars={config.market_data.bars.timeframe}")
     print(f"LOG_DIRECTORY = {log_path.parent.resolve()}")
@@ -77,7 +76,7 @@ async def run(minutes: float | None, seconds: float | None, report_path: str | N
             config=config,
             engine=engine,
             duration_seconds=duration,
-            execution_disabled=True,
+            execution_disabled=not engine.execution_enabled,
         )
         matrix = build_readiness_matrix(engine)
     finally:

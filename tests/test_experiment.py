@@ -23,6 +23,11 @@ def _config(**overrides):
     config.trading.broker = "mock"
     config.ai.enabled = False
     config.storage.enabled = False
+    # In-memory pin: these tests exercise the experiment/authorization lifecycle,
+    # which requires the execution gate to start closed. The repository file
+    # (configs/config.yaml) is the single source of truth for the live app; here
+    # we pin it explicitly so behaviour is independent of the shipped default.
+    config.execution.enabled = False
     config.logging.console.enabled = False
     config.logging.file.enabled = False
     config.market_data.max_future_skew_seconds = 86400 * 30

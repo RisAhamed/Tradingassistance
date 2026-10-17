@@ -80,7 +80,7 @@ Alpaca trading client is constructed.
 .\.venv\Scripts\python.exe scripts\acceptance_alpaca.py --seconds 120
 
 # Configurable soak with live-only candle metrics and JSON/Markdown reports
-.\.venv\Scripts\python.exe scripts\soak_alpaca.py --seconds 900 `
+.\.venv\Scripts\python.exe scripts\live_trade_runner.py --seconds 900 `
   --report logs/reports/phase_d1_2_soak_900s.json
 ```
 
@@ -558,7 +558,7 @@ Leaving them unset keeps the safe offline defaults (`history.provider: none`).
 | Tool | Command | Purpose |
 | --- | --- | --- |
 | Readiness matrix | `scripts/readiness_report.py --out logs/readiness.json` | JSON + markdown readiness table |
-| Live soak | `scripts/soak_alpaca.py --minutes 60` | Counts bars/gaps/recovery/orders over a window |
+| Live soak | `scripts/live_trade_runner.py --minutes 60` | Counts bars/gaps/recovery/orders over a window |
 | Outage/recovery | `scripts/outage_recovery.py --scenario missing_bars` | Deterministic fault injection + recovery chain |
 
 All are configured under `testing:` in `configs/config.yaml` and are **never**

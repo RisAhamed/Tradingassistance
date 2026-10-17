@@ -479,10 +479,10 @@ def test_backtest_never_creates_real_broker_orders():
         assert "broker_order_id" not in order or order.get("broker_order_id") is None
 
 
-def test_repository_config_remains_unchanged():
+def test_repository_config_remains_paper_and_declares_execution():
     config = load_config(env=get_env())
-    assert config.execution.enabled is False
     assert config.trading.mode == "paper"
+    assert isinstance(config.execution.enabled, bool)
 
 
 # ---------------------------------------------------------------------------

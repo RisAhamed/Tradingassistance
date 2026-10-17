@@ -549,6 +549,20 @@ class TradingEngine:
                 pass
             except Exception:  # noqa: BLE001 - shutdown must not raise
                 logger.exception("sentiment loop shutdown error")
+        # GRACEFUL SHUTDOWN SAFETY (single source of truth: configs/config.yaml):
+        # when live (execution.enabled is true) and holding a position, close it
+        # BEFORE the broker connection is torn down. This runs on every stop path
+        # — SIGINT, SIGTERM (caught by uvicorn for `python -m app`), and normal
+        # exit — so a killed process never leaves an unprotected open position.
+        if self.execution_enabled and not self.position_manager.is_flat:
+            logger.warning(
+                "FLATTEN ON SHUTDOWN",
+                extra={"structured": {"event": "FLATTEN_ON_SHUTDOWN", "component": "engine"}},
+            )
+            try:
+                await self.flatten(session_closeout=True)
+            except Exception:  # noqa: BLE001 - shutdown must always complete
+                logger.exception("flatten-on-shutdown failed")
         await self.provider.disconnect()
         await self.broker.disconnect()
         logger.info("ENGINE STOPPED", extra={"structured": {"event": "ENGINE_STOPPED", "component": "engine"}})

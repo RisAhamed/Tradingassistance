@@ -796,7 +796,7 @@ class SoakConfig(_Section):
     maximum_missing_bars: int = 3
     required_live_timeframes: list[str] = Field(default_factory=lambda: ["1m", "5m", "15m"])
     fail_on_unexpected_state: bool = True
-    # D.1.3 soak policy (driven by scripts/soak_alpaca.py when provided).
+    # D.1.3 soak policy (driven by scripts/live_trade_runner.py when provided).
     duration_seconds: float | None = None
     minimum_live_bars: int = 1
     minimum_live_candles: int = 1
