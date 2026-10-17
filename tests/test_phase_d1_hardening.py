@@ -184,7 +184,7 @@ async def test_stream_state_uses_same_policy_as_risk_gate():
         assert bar["fresh"] is (not policy.is_stale)
         assert bar["clock_state"] in CLOCK_STATES
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -197,7 +197,7 @@ async def test_stream_state_reports_clock_state_for_future_bar():
         assert bar["clock_state"] == "FUTURE_TIMESTAMP"
         assert bar["clock_skew_seconds"] > 0
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 # ==========================================================================
@@ -257,7 +257,7 @@ async def test_trade_plan_invalidated_on_regime_change():
         assert engine._trade_plan.invalidation_reason == "REGIME_CHANGED"
         assert engine._trade_plan_history, "invalidated plan must be kept in history"
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -270,7 +270,7 @@ async def test_trade_plan_invalidated_on_stale_market_data():
         engine._last_bar_at = utcnow() - timedelta(seconds=10_000)
         assert engine.trade_plan_invalidity(engine._trade_plan, utcnow()) == "STALE_MARKET_DATA"
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -284,7 +284,7 @@ async def test_trade_plan_invalidated_on_data_integrity_failure():
         engine._data_gap_ok = False
         assert engine.trade_plan_invalidity(engine._trade_plan, utcnow()) == "DATA_INTEGRITY_FAILURE"
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -302,7 +302,7 @@ async def test_trade_plan_invalidated_on_maximum_holding():
             engine._trade_plan, utcnow()
         ) == "MAXIMUM_HOLDING_EXCEEDED"
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -326,7 +326,7 @@ async def test_trade_plan_invalidated_on_spread_widening():
         )
         assert engine.trade_plan_invalidity(engine._trade_plan, utcnow()) == "SPREAD_UNACCEPTABLE"
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -343,7 +343,7 @@ async def test_valid_plan_reports_no_invalidity():
         engine._data_gap_ok = True
         assert engine.trade_plan_invalidity(engine._trade_plan, utcnow()) is None
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -363,7 +363,7 @@ async def test_invalidated_plan_emits_event_and_blocks():
         assert evt.payload["previous_status"] == "active"
         assert evt.payload["new_status"] == "invalidated"
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 # ==========================================================================
@@ -383,7 +383,7 @@ async def test_trade_plan_persists_and_reloads_after_restart(tmp_path):
         plan.model_dump(mode="json"), session_id="ses_d1"
     )
     assert saved is True
-    await engine1.stop()
+    await runtime1.shutdown()
 
     # --- session 2: restart, reload, verify
     runtime2 = build_runtime(config, env)
@@ -399,7 +399,7 @@ async def test_trade_plan_persists_and_reloads_after_restart(tmp_path):
         assert latest is not None
         assert latest["plan_id"] == plan.plan_id
     finally:
-        await engine2.stop()
+        await runtime2.shutdown()
 
 
 @pytest.mark.asyncio
@@ -430,7 +430,7 @@ async def test_trade_plan_columns_map_to_real_values(tmp_path):
             assert row.invalidation_reason is None
             assert row.reason_codes["entry_conditions"], "reason_codes must carry conditions"
     finally:
-        await engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -453,7 +453,7 @@ async def test_trade_plan_invalidation_reason_persists_to_column(tmp_path):
             assert row.status == "invalidated"
             assert row.invalidation_reason == "REGIME_CHANGED"
     finally:
-        await engine.stop()
+        await runtime.shutdown()
 
 
 # ==========================================================================
@@ -475,7 +475,7 @@ async def test_trade_plan_update_overwrites_existing_row(tmp_path):
         assert loaded["status"] == TradePlanStatus.INVALIDATED.value
         assert loaded["invalidation_reason"] == "STALE_MARKET_DATA"
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -499,7 +499,7 @@ async def test_trade_plan_invalidation_is_persisted(tmp_path):
         assert loaded["status"] == "invalidated"
         assert loaded["invalidation_reason"] == "REGIME_CHANGED"
     finally:
-        await engine.stop()
+        await runtime.shutdown()
 
 
 # ==========================================================================
@@ -520,7 +520,7 @@ async def test_decision_trace_has_all_pipeline_stages():
                                   "inputs", "output", "timestamp"}
             assert entry["status"] in TRACE_STATUSES
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -533,7 +533,7 @@ async def test_decision_trace_records_execution_gate_disabled():
         assert gate, "execution gate must always appear in the trace"
         assert gate[-1]["output"].get("status") == "DISABLED"
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -550,7 +550,7 @@ async def test_decision_trace_freshness_stage_reports_thresholds():
             assert key in out, f"freshness trace missing {key}"
         assert out["clock_state"] in CLOCK_STATES
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -563,7 +563,7 @@ async def test_decision_trace_is_bounded():
             engine._trace("X", "PASS", decision="D", reason="R")
         assert len(engine.decision_trace()) <= limit
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 # ==========================================================================
@@ -590,7 +590,7 @@ async def test_sizing_rejects_malformed_stop_distance():
             assert result.ok is False, f"entry_reference={bad} must be rejected"
             assert result.rejected_reason
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -603,7 +603,7 @@ async def test_sizing_rejects_non_positive_equity():
             assert result.ok is False
             assert result.rejected_reason
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -619,7 +619,7 @@ async def test_sizing_respects_precision_and_maximum():
         decimals = len(str(result.final_quantity).split(".")[-1])
         assert decimals <= cfg.quantity_precision
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -632,7 +632,7 @@ async def test_sizing_caps_notional():
         assert result.ok is True
         assert result.final_quantity * 30_000.0 <= 1_000.0 + 1e-6
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 # ==========================================================================
@@ -649,7 +649,7 @@ async def test_full_pipeline_reaches_gate_and_stops():
         assert engine.position_manager.is_flat
         assert engine.readiness()["execution"] == "DISABLED"
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -664,7 +664,7 @@ async def test_pipeline_emits_block_and_creates_no_orders():
         assert "EntryBlocked" in types or "ExecutionBlocked" in types
         assert engine.oms.all_orders() == []
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -680,7 +680,7 @@ async def test_payload_exposes_trace_and_history():
         assert "timeframe_selection" in payload
         assert "trade_plan" in payload
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 @pytest.mark.asyncio
 async def test_stream_state_reports_no_data():
     runtime = await _build_engine()
@@ -691,7 +691,7 @@ async def test_stream_state_reports_no_data():
         assert bar["clock_state"] == "NO_DATA"
         assert bar["fresh"] is False
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -708,7 +708,7 @@ async def test_update_data_health_uses_cadence_aware_threshold():
         await engine._update_data_health(utcnow())
         assert engine._stale_flag is True
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
 
 
 def test_trade_plan_wait_when_regime_unknown():
@@ -743,4 +743,4 @@ async def test_trade_plan_invalidated_on_session_cutoff():
             engine._trade_plan, utcnow()
         ) == "SESSION_ENTRIES_CLOSED"
     finally:
-        await runtime.engine.stop()
+        await runtime.shutdown()
